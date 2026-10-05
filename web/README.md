@@ -1,5 +1,7 @@
 # Review Port
 
+公開URL：[Review Port](https://google-maps-reviews.vercel.app/)
+
 Googleマップの店舗URLから口コミを収集し、CSVに保存するNext.js + shadcn/uiの画面です。セットアップ、制限、Vercel自動更新の設定は[リポジトリのREADME](../README.md)を参照してください。
 
 ```bash

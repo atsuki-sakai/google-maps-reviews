@@ -114,6 +114,8 @@ GitHub Actionsは使用しません。ローカルのPythonテストで抽出リ
 
 ## Web画面（Next.js + shadcn/ui）
 
+公開URL：[Review Port](https://google-maps-reviews.vercel.app/)
+
 `web/` にURL入力・収集状況・口コミ一覧・CSVダウンロード画面を同梱しています。
 
 ```bash

@@ -32,7 +32,10 @@ export function Collector() {
     let completed = false;
     try {
       const response = await fetch('/api/collect', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: target }), signal: controller.signal });
-      if (!response.ok) throw new Error((await response.json()).error || '収集を開始できませんでした。');
+      if (!response.ok) {
+        const body = await response.json().catch(() => null);
+        throw new Error(typeof body?.error === 'string' && body.error ? body.error : '収集を開始できませんでした。時間をおいて再度お試しください。');
+      }
       if (!response.body) throw new Error('収集結果を受信できませんでした。');
       const reader = response.body.getReader();
       const decoder = new TextDecoder(); let buffer = '';
