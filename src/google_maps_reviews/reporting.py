@@ -8,6 +8,8 @@ import hashlib
 import html
 import json
 import re
+import csv
+import io
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -44,7 +46,10 @@ def read_json(path: Path):
 
 def source_data(path: Path) -> tuple[dict, list[dict], str]:
     raw = path.read_bytes()
-    data = json.loads(raw)
+    try:
+        data = csv_source(raw) if path.suffix.lower() == ".csv" else json.loads(raw)
+    except csv.Error as error:
+        raise ValueError(f"CSVの形式を確認してください: {error}") from error
     if not isinstance(data, dict) or not isinstance(data.get("metadata"), dict) or not isinstance(data.get("reviews"), list):
         raise ValueError("収集CLIのJSON（metadata・reviews）が必要です。")
     reviews = data["reviews"]
@@ -66,6 +71,61 @@ def source_data(path: Path) -> tuple[dict, list[dict], str]:
     return data["metadata"], reviews, hashlib.sha256(raw).hexdigest()
 
 
+def csv_source(raw: bytes) -> dict:
+    """Import only the supplied CSV. No neighboring files or browser access."""
+    from .cli import FIELDS
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError as error:
+        raise ValueError("CSVをUTF-8形式で保存してください（BOM付きも利用できます）。") from error
+    csv.field_size_limit(10_000_000)
+    reader = csv.DictReader(io.StringIO(text, newline=""), strict=True)
+    headers = reader.fieldnames
+    if not headers or len(headers) != len(set(headers)):
+        raise ValueError("CSVのヘッダーがないか、同名の列が重複しています。")
+    aliases = {key: (title, key) for key, title in FIELDS}
+    aliases["text"] += ("本文", "review_text")
+    aliases["rating"] += ("評価", "stars")
+    columns = {}
+    for key, names in aliases.items():
+        matches = [name for name in names if name in headers]
+        if len(matches) > 1:
+            raise ValueError(f"CSVに同じ項目の列が複数あります: {key}")
+        if matches:
+            columns[key] = matches[0]
+    if not {"text", "rating"} <= set(columns):
+        raise ValueError("CSVには「口コミ本文」「星評価」（またはtext・rating）の列が必要です。")
+    reviews = []
+    for index, values in enumerate(reader, 1):
+        if None in values or any(value is None for value in values.values()):
+            raise ValueError(f"CSVの{index}行目: 列数がヘッダーと一致しません。")
+        if not any(values.values()):
+            continue
+        row = {key: values[column] for key, column in columns.items()}
+        rating = row.get("rating", "").strip()
+        if rating and not re.fullmatch(r"[1-5](?:\.0)?", rating):
+            raise ValueError(f"CSVの{index}行目: 星評価は1〜5、または空欄です。")
+        if not rating and not row["text"].strip():
+            raise ValueError(f"CSVの{index}行目: 星評価または口コミ本文が必要です。")
+        row["rating"] = int(float(rating)) if rating else None
+        flag = row.get("text_may_be_truncated", "").strip().lower()
+        if flag not in ("", "false", "0", "true", "1"):
+            raise ValueError(f"CSVの{index}行目: 本文の省略ありはTrue/Falseで指定してください。")
+        row["text_may_be_truncated"] = flag in ("true", "1")
+        if not row.get("review_id", "").strip():
+            row["review_id"] = f"csv-row-{index:06d}"
+            row["review_id_origin"] = "CSV行番号（Googleの口コミIDは未提供）"
+        reviews.append(row)
+    places = {row.get("place_name", "").strip() for row in reviews} - {""}
+    urls = {row.get("source_url", "").strip() for row in reviews} - {""}
+    if len(places) > 1 or len(urls) > 1:
+        raise ValueError("CSVに複数の店舗名または店舗URLがあります。施設ごとに分けてください。")
+    collected = {row.get("collected_at", "").strip() for row in reviews} - {""}
+    return {"metadata": {"input_format": "csv", "place_name": next(iter(places), "店舗名未提供"),
+            "source_url": next(iter(urls), ""), "collected_at": max(collected) if collected else "未提供",
+            "stop_reason": "利用者が指定したCSVを分析（Googleマップの全件取得はCSV単体では未確認）"}, "reviews": reviews}
+
+
 def coverage(metadata: dict, reviews: list[dict]) -> dict:
     total = metadata.get("displayed_total_end")
     if type(total) is not int or total < 1:
@@ -73,6 +133,7 @@ def coverage(metadata: dict, reviews: list[dict]) -> dict:
     count = len(reviews)
     verified = metadata.get("full_coverage_verified") is True and total == count
     return {"count": count, "displayed_total": total, "full_coverage_verified": verified,
+            "input_format": metadata.get("input_format", "json"),
             "is_sample": metadata.get("sample") is True,
             "missing": max(0, total - count) if total else None,
             "text_count": sum(bool(r.get("text", "").strip()) for r in reviews),
@@ -87,8 +148,17 @@ def prepare(source: Path, output: Path, *, context: Path | None = None, batch_si
     output = output.expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
     if (output / "manifest.json").exists():
-        raise ValueError("既存レポートを上書きしません。続きはreport resume、または別の保存先を指定してください。")
-    (output / "source.json").write_bytes(source.read_bytes())
+        raise ValueError("既存レポートを上書きしません。Skillに分析フォルダーを渡して続けるか、別の保存先を指定してください。")
+    original = source.read_bytes()
+    input_info = {}
+    if source.suffix.lower() == ".csv":
+        (output / "source.csv").write_bytes(original)
+        normalized_source = (json.dumps({"metadata": metadata, "reviews": reviews}, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+        digest = hashlib.sha256(normalized_source).hexdigest()
+        (output / "source.json").write_bytes(normalized_source)
+        input_info = {"input_format": "csv", "original_input_file": "source.csv", "original_input_sha256": hashlib.sha256(original).hexdigest()}
+    else:
+        (output / "source.json").write_bytes(original)
     if context:
         (output / "business-context.md").write_text(context.read_text(encoding="utf-8"), encoding="utf-8")
     text_reviews = []
@@ -101,6 +171,8 @@ def prepare(source: Path, output: Path, *, context: Path | None = None, batch_si
             text_reviews.append({"key": key, "rating": review.get("rating"), "date_text": review.get("date_text", ""),
                                  "text": review["text"], "owner_reply": review.get("owner_reply", ""),
                                  "text_may_be_truncated": bool(review.get("text_may_be_truncated")),
+                                 "date_precision": review.get("date_precision", ""), "period_match": review.get("period_match", ""),
+                                 "date_earliest": review.get("date_earliest", ""), "date_latest": review.get("date_latest", ""),
                                  "translation_visible": "Google による翻訳" in review.get("raw_visible_text", "") or "Googleによる翻訳" in review.get("raw_visible_text", "")})
     names = []
     for start in range(0, len(text_reviews), batch_size):
@@ -115,6 +187,7 @@ def prepare(source: Path, output: Path, *, context: Path | None = None, batch_si
                 "resolved_url": str(metadata.get("resolved_url", "")),
                 "source_url": str(metadata.get("source_url", "")), "coverage": coverage(metadata, reviews),
                 "keys": key_map, "batches": names, "prepared_at": datetime.now().astimezone().isoformat(timespec="seconds")}
+    manifest.update(input_info)
     write_json(output / "manifest.json", manifest)
     return output
 
@@ -126,6 +199,9 @@ def workspace(output: Path):
     metadata, reviews, digest = source_data(output / "source.json")
     if digest != manifest.get("source_sha256"):
         raise ValueError("source.jsonが準備後に変更されています。別の保存先でprepareをやり直してください。")
+    if manifest.get("input_format") == "csv":
+        if manifest.get("original_input_file") != "source.csv" or hashlib.sha256((output / "source.csv").read_bytes()).hexdigest() != manifest.get("original_input_sha256"):
+            raise ValueError("入力CSVが準備後に変更されています。別の保存先でprepareをやり直してください。")
     keys = {f"R{i:04d}": r for i, r in enumerate(reviews, 1)}
     if manifest.get("keys") != {key: r["review_id"] for key, r in keys.items()}:
         raise ValueError("manifest.jsonの口コミ対応表が元データと一致しません。")
@@ -231,6 +307,8 @@ def load_annotations(output: Path, *, require_complete=True) -> tuple[dict, dict
         row["checks"] = list(row["checks"])
         if keys[key].get("text_may_be_truncated"):
             row["checks"].append("原文の省略表示あり")
+        if keys[key].get("date_precision"):
+            row["checks"].append("日付: " + keys[key]["date_precision"] + " / " + keys[key].get("period_match", ""))
         if reply_drafts and keys[key].get("owner_reply"):
             row["checks"].append("既存返信あり・差し替え候補として確認")
         if row["confidence"] == "low" and keys[key].get("text", "").strip():
@@ -377,16 +455,18 @@ def render(output: Path) -> Path:
         ["入力URL", manifest.get("requested_url", "")], ["取得日時", manifest["collected_at"]],
         ["生成日時", generated_at], ["保存件数", stats["count"]], ["画面の総件数", manifest["coverage"]["displayed_total"]],
         ["本文あり", stats["text_count"]], ["評価のみ", stats["rating_only_count"]], ["平均星", stats["mean"]],
-        ["全件照合", "照合済み" if manifest["coverage"]["full_coverage_verified"] else "未確認・取得した範囲の分析"],
+        ["分析対象", "指定CSVの全行" if manifest["coverage"].get("input_format") == "csv" else "指定された元データの全行"],
+        ["Google全件照合", "照合済み" if manifest["coverage"]["full_coverage_verified"] else "未確認（CSV単体では確認不可）" if manifest["coverage"].get("input_format") == "csv" else "未確認・取得した範囲の分析"],
         ["停止理由", manifest["coverage"]["stop_reason"]], ["返信案", "生成あり" if manifest.get("reply_drafts", True) else "生成なし"],
         ["全体概要", synthesis["executive_summary"]], ["業種", synthesis["business_type"]],
         ["利用方法", "管理IDで原文・根拠・改善案を照合できます。改善アクションの状態列は実行状況に合わせて変更してください。集計は生成時点の値です。"],
         ["原文SHA256", manifest["source_sha256"]],
+        ["入力CSVのSHA256", manifest.get("original_input_sha256", "未提供")],
     ] + [[f"星{i}の件数", stats["stars"][str(i)]] for i in range(5, 0, -1)]
       + [[f"本文感情：{title}", stats["sentiments"][code]] for code, title in SENTIMENTS.items()]
       + [[f"{group['label']}：件数", group["count"]] for group in stats["cohorts"]])
-    write_sheet(book, "分類済み口コミ", ["管理ID", "口コミID", "投稿者", "星", "表示日付", "本文", "本文感情", "カテゴリ", "要約", "確信度", "要確認", "既存返信", "収集日時"],
-               ([r["key"], r["raw"]["review_id"], r["raw"].get("author", ""), r["raw"].get("rating"), r["raw"].get("date_text", ""), r["raw"].get("text", ""), SENTIMENTS[r["sentiment"]], " / ".join(CATEGORIES[a["category"]] for a in r["aspects"]), r["summary_ja"], CONFIDENCES[r["confidence"]], " / ".join(r["checks"]), r["raw"].get("owner_reply", ""), manifest["collected_at"]] for r in rows))
+    write_sheet(book, "分類済み口コミ", ["管理ID", "口コミID", "投稿者", "星", "表示日付", "本文", "本文感情", "カテゴリ", "要約", "確信度", "要確認", "既存返信", "収集日時", "日付範囲の開始", "日付範囲の終了", "日付の精度", "期間判定"],
+               ([r["key"], r["raw"]["review_id"], r["raw"].get("author", ""), r["raw"].get("rating"), r["raw"].get("date_text", ""), r["raw"].get("text", ""), SENTIMENTS[r["sentiment"]], " / ".join(CATEGORIES[a["category"]] for a in r["aspects"]), r["summary_ja"], CONFIDENCES[r["confidence"]], " / ".join(r["checks"]), r["raw"].get("owner_reply", ""), manifest["collected_at"]] + [r["raw"].get(key, "") for key in ("date_earliest", "date_latest", "date_precision", "period_match")] for r in rows))
     write_sheet(book, "話題別根拠", ["管理ID", "口コミID", "カテゴリ", "感情", "根拠引用", "解釈"],
                ([r["key"], r["raw"]["review_id"], CATEGORIES[a["category"]], SENTIMENTS[a["polarity"]], a["quote"], a["detail"]] for r in rows for a in r["aspects"]))
     if manifest.get("reply_drafts", True):

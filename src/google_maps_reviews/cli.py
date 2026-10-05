@@ -18,6 +18,7 @@ from urllib.request import ProxyHandler, Request, build_opener
 
 from . import __version__
 from .browser import collection_browser
+from .dates import iso_date, select_period
 
 ROOT = Path(__file__).resolve().parent
 REVIEW_CARD_SELECTOR = '[data-review-id]:not([data-review-id] [data-review-id])'
@@ -28,6 +29,8 @@ FIELDS = [
     ("review_url", "口コミURL（表示された場合）"), ("author_url", "投稿者URL"),
     ("source_url", "店舗URL"), ("collected_at", "取得日時"),
     ("text_may_be_truncated", "本文の省略あり"), ("raw_visible_text", "カード全体の表示テキスト"),
+    ("date_earliest", "日付範囲の開始（推定を含む）"), ("date_latest", "日付範囲の終了（推定を含む）"),
+    ("date_precision", "日付の精度"), ("period_match", "期間判定"),
 ]
 
 
@@ -132,7 +135,11 @@ def export_reviews(rows: list[dict], metadata: dict, output_dir: Path, stem: str
     csv_path, xlsx_path, json_path = [output_dir / f"{stem}.{ext}" for ext in ("csv", "xlsx", "json")]
     # A JSON snapshot is saved first so original text survives spreadsheet failures.
     tmp_json = json_path.with_suffix(".json.tmp")
-    tmp_json.write_text(json.dumps({"metadata": metadata, "reviews": rows}, ensure_ascii=False, indent=2), encoding="utf-8")
+    metadata = dict(metadata)
+    snapshot = {"metadata": metadata, "reviews": rows}
+    if "period_uncertain_reviews" in metadata:
+        snapshot["uncertain_reviews"] = metadata.pop("period_uncertain_reviews")
+    tmp_json.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp_json.replace(json_path)
     with csv_path.open("w", encoding="utf-8-sig", newline="") as file:
         writer = csv.writer(file)
@@ -147,8 +154,8 @@ def export_reviews(rows: list[dict], metadata: dict, output_dir: Path, stem: str
         sheet.append([spreadsheet_value(row.get(key, "")) for key, _ in FIELDS])
     sheet.freeze_panes = "A2"
     sheet.auto_filter.ref = sheet.dimensions
-    widths = [26, 22, 10, 24, 70, 55, 26, 30, 30, 35, 30, 16, 65]
-    for column, width in zip("ABCDEFGHIJKLM", widths):
+    widths = [26, 22, 10, 24, 70, 55, 26, 30, 30, 35, 30, 16, 65, 28, 28, 35, 35]
+    for column, width in zip("ABCDEFGHIJKLMNOPQ", widths):
         sheet.column_dimensions[column].width = width
     for cell in sheet[1]:
         cell.fill = PatternFill("solid", fgColor="203864")
@@ -161,6 +168,18 @@ def export_reviews(rows: list[dict], metadata: dict, output_dir: Path, stem: str
             cell.font = Font(name="Arial", size=11)
             cell.alignment = Alignment(vertical="top", wrap_text=True)
         sheet.row_dimensions[row[0].row].height = 75
+    if snapshot.get("uncertain_reviews"):
+        uncertain = book.copy_worksheet(sheet)
+        uncertain.title = "期間境界・日付不明"
+        if uncertain.max_row > 1:
+            uncertain.delete_rows(2, uncertain.max_row - 1)
+        for review in snapshot["uncertain_reviews"]:
+            uncertain.append([spreadsheet_value(review.get(key, "")) for key, _ in FIELDS])
+        for row in uncertain.iter_rows(min_row=2):
+            for cell in row:
+                if isinstance(cell.value, str):
+                    cell.data_type = "s"
+        uncertain.auto_filter.ref = uncertain.dimensions
     summary = book.create_sheet("取得情報")
     summary.append(["項目", "内容"])
     labels = {
@@ -172,10 +191,13 @@ def export_reviews(rows: list[dict], metadata: dict, output_dir: Path, stem: str
         "incomplete": "全件取得未確認",
         "text_review_count": "本文ありの口コミ件数", "rating_only_count": "評価のみの口コミ件数",
         "missing_count": "画面総件数との差（未取得件数）",
+        "date_from": "期間の開始日", "date_to": "期間の終了日", "scanned_count": "期間絞り込み前の読取件数",
+        "scan_coverage_verified": "一覧全件の読取件数照合", "period_selection_verified": "期間判定に要確認なし（表示日付に基づく）",
+        "period_uncertain_count": "期間境界・日付不明件数", "period_excluded_count": "期間外件数", "date_filter_method": "日付の判定方法",
     }
     for key, value in metadata.items():
         summary.append([labels.get(key, key), spreadsheet_value(str(value))])
-    summary.append(["投稿日", "「1か月前」等の表示をそのまま保存。日付の推定はしていません。"])
+    summary.append(["投稿日", "画面表記を保存。期間指定では相対表示を日付の範囲として推定し、境界・不明な日付は別シートへ保存。正確な投稿日を保証しません。"])
     summary.append(["本文と返信", "画面に表示されたテキスト。翻訳や省略が含まれる場合があります。"])
     summary.append(["CSV", "Excelで数式扱いされる文字列の先頭にアポストロフィを付けています。元データはJSONに保存。"])
     summary.append(["長い本文", "Excelは1セル32,767文字まで。超過分と制御文字はCSV・JSONに保存されています。"])
@@ -277,6 +299,34 @@ def expand_text(page, processed: set[str], deadline: float | None = None):
         # Cache only after extraction verifies that no collapsed text remains.
 
 
+def open_full_reviews(page) -> bool:
+    """Leave the five-card preview before scrolling the complete review list."""
+    button = page.get_by_role("button", name=re.compile(
+        r"クチコミをもっと見る|口コミをもっと見る|すべてのクチコミを表示|more reviews|see all reviews", re.I)).first
+    if not button.is_visible():
+        return False
+    button.click(timeout=10000)
+    page.get_by_role("button", name=re.compile(r"並べ替え|sort", re.I)).first.wait_for(state="visible", timeout=15000)
+    page.locator(REVIEW_CARD_SELECTOR).first.wait_for(state="visible", timeout=15000)
+    try:
+        button.wait_for(state="hidden", timeout=5000)
+    except Exception:
+        # Maps sometimes changes the URL but keeps the preview DOM. Reload the
+        # same place's review URL once, instead of scrolling the stale preview.
+        page.reload(wait_until="domcontentloaded", timeout=45000)
+        page.locator(REVIEW_CARD_SELECTOR).first.wait_for(state="visible", timeout=20000)
+        try:
+            button.wait_for(state="hidden", timeout=15000)
+        except Exception as error:
+            raise RuntimeError("全口コミへの切り替えが完了しません。--manualで専用Chromeの表示・ログインを確認してください。") from error
+    return True
+
+
+def reviews_restricted(page) -> bool:
+    body = page.locator("body").inner_text(timeout=3000)
+    return bool(re.search(r"Google\s*マップの表示が制限|Google\s*Maps[^\n]{0,80}(restricted|limited)", body, re.I))
+
+
 def review_scroll_state(page) -> dict:
     return page.locator(REVIEW_CARD_SELECTOR).first.evaluate("""card => {
         for (let el = card.parentElement; el; el = el.parentElement) {
@@ -329,13 +379,15 @@ def blocked(page) -> bool:
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(prog="google-maps-reviews", description="Googleマップの口コミを収集し、CSV・Excel・JSONに保存します。無引数で対話メニューを開きます。", epilog="準備: setup --browser chrome / 設定: settings show / 分析レポート: report 店舗URL / Skill導入: skill install（すべてgoogle-maps-reviewsに続けて指定）")
+    parser = argparse.ArgumentParser(prog="google-maps-reviews", description="Googleマップの口コミを収集し、CSV・Excel・JSONに保存します。無引数で対話メニューを開きます。", epilog="準備: setup --browser chrome / 設定: settings show / CSV分析Skill導入: skill install（すべてgoogle-maps-reviewsに続けて指定）")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("url", nargs="?", type=maps_url, help="店舗URL。省略時はブラウザーで店舗を選択")
     scope = parser.add_mutually_exclusive_group()
     scope.add_argument("--max", type=positive_int, default=100, help="最大取得件数（既定:100）")
     scope.add_argument("--all", action="store_true", help="件数上限なしで収集し、画面の総件数との一致を確認")
     scope.add_argument("--visible-only", action="store_true", help="スクロールせず現在読み込まれた口コミを件数上限なしで保存")
+    parser.add_argument("--from", dest="date_from", type=iso_date, help="期間の開始日 YYYY-MM-DD（当日を含む）")
+    parser.add_argument("--to", dest="date_to", type=iso_date, help="期間の終了日 YYYY-MM-DD（当日を含む、省略時は取得日）")
     parser.add_argument("--manual", action="store_true", help="口コミの画面を自分で開いてから収集")
     parser.add_argument("--delay", type=positive_seconds, default=2.0, help="スクロール後の待機秒数（既定:2）")
     parser.add_argument("--timeout", type=positive_int, default=300, help="収集の制限秒数（既定:300、手動操作時間を除く）")
@@ -419,7 +471,12 @@ def collect_from_local_service(args, reviews: dict, metadata: dict) -> bool:
 
 
 def run_collection(args) -> int:
-    limit = sys.maxsize if args.all or args.visible_only else args.max
+    period = bool(args.date_from or args.date_to)
+    if period:
+        if args.all or args.visible_only:
+            raise ValueError("期間指定と--all・--visible-onlyは同時に指定できません。")
+        select_period([], args.date_from, args.date_to, datetime.now().astimezone().date())
+    limit = sys.maxsize if args.all or args.visible_only or period else args.max
     output_dir = args.output_dir.expanduser().resolve()
     try:
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -435,6 +492,8 @@ def run_collection(args) -> int:
                 "requested_url": args.url or "",
                 "requested_max": "全件" if args.all else "読み込み済み全件" if args.visible_only else args.max,
                 "coverage": "画面から読み取れた口コミのみ。全件取得の保証はありません。"}
+    if period:
+        metadata.update(date_from=args.date_from, date_to=args.date_to or now.date().isoformat(), requested_max="指定期間（一覧全件を確認して絞り込み）")
     reviews = {}
     if args.demo:
         merge_reviews(reviews, [{"review_id": "DEMO-001", "author": "サンプル投稿者（架空）", "rating": 4,
@@ -510,8 +569,13 @@ def run_collection(args) -> int:
                         if time.monotonic() - started >= args.timeout:
                             metadata["stop_reason"] = "制限時間に到達"
                             break
+                        if reviews_restricted(page):
+                            raise RuntimeError("Googleマップが表示する口コミを制限しています。取得済み分を保存します。--manualで専用Chromeにログインし、同じ店舗の全口コミが表示されることを確認してから再実行してください。")
                         if not data["reviews"]:
                             raise RuntimeError("口コミカードを読み取れません。画面変更または未対応の表示形式です。")
+                        if open_full_reviews(page):
+                            stagnant = 0
+                            continue
                         state = review_scroll_state(page)
                         stagnant = next_stagnant_count(stagnant, added, state)
                         if stagnant >= 8 and metadata.get("displayed_total_end") is None:
@@ -538,24 +602,35 @@ def run_collection(args) -> int:
         except Exception as error:
             metadata.update(stop_reason="エラーによる停止", error=str(error))
             print(f"収集中に停止しました: {error}", file=sys.stderr)
-    rows = list(reviews.values())[:limit]
+    scanned_rows = list(reviews.values())[:limit]
+    rows = scanned_rows
+    if period:
+        rows, uncertain, excluded = select_period(scanned_rows, args.date_from, args.date_to, now.date())
+        metadata.update(scanned_count=len(scanned_rows), period_uncertain_count=len(uncertain),
+                        period_excluded_count=excluded, period_uncertain_reviews=uncertain,
+                        date_filter_method="画面の日付を範囲として推定。範囲全体が指定期間内の行のみCSVに保存。境界・不明はExcel別シート・JSON uncertain_reviewsに保存。")
     metadata["count"] = len(rows)
     metadata["text_review_count"] = sum(bool(row.get("text", "").strip()) for row in rows)
     metadata["rating_only_count"] = len(rows) - metadata["text_review_count"]
     if not args.demo:
-        metadata["full_coverage_verified"] = (full_coverage_verified(rows, metadata.get("displayed_total_end"))
+        metadata["full_coverage_verified"] = (full_coverage_verified(scanned_rows, metadata.get("displayed_total_end"))
                                               and "error" not in metadata and metadata.get("service_verified", True) is True)
         metadata["truncated_count"] = sum(bool(row.get("text_may_be_truncated")) for row in rows)
         expected = metadata.get("displayed_total_end")
-        metadata["missing_count"] = max(0, expected - len(rows)) if expected is not None else None
+        metadata["missing_count"] = max(0, expected - len(scanned_rows)) if expected is not None else None
         if metadata["full_coverage_verified"]:
-            metadata["coverage"] = f"画面の総件数と口コミIDの重複なしの保存件数が一致: {len(rows)}件"
+            metadata["coverage"] = f"画面の総件数と口コミIDの重複なしの読取件数が一致: {len(scanned_rows)}件"
             if args.all and metadata.get("stop_reason", "").startswith("口コミ一覧の末尾"):
                 metadata["stop_reason"] = "口コミ一覧の末尾に到達し、画面の総件数との一致を確認"
-        elif args.all:
+        elif args.all or period:
             metadata["incomplete"] = True
             print(f"全件取得は未確認です。保存{len(rows)}件 / 画面{metadata.get('displayed_total_end', '不明')}件。", file=sys.stderr)
-    if not rows:
+        if period:
+            metadata["period_selection_verified"] = metadata["full_coverage_verified"] and not metadata["period_uncertain_count"]
+            metadata["incomplete"] = not metadata["period_selection_verified"]
+            metadata["scan_coverage_verified"] = metadata["full_coverage_verified"]
+            metadata["full_coverage_verified"] = False
+    if not scanned_rows:
         print("口コミを取得できなかったため、口コミファイルは生成していません。", file=sys.stderr)
         if args.browser == "chromium":
             print("Chromium未導入の場合: google-maps-reviews setup --browser chromium", file=sys.stderr)
@@ -569,6 +644,8 @@ def run_collection(args) -> int:
         return 1
     print(f"\n{len(rows)}件を保存しました。停止理由: {metadata['stop_reason']}")
     print(f"本文あり: {metadata['text_review_count']}件 / 評価のみ: {metadata['rating_only_count']}件")
+    if period:
+        print(f"期間: {metadata['date_from'] or '開始指定なし'}〜{metadata['date_to']} / 一覧読取: {metadata['scanned_count']}件 / 日付の要確認: {metadata['period_uncertain_count']}件（Excel別シート）")
     if metadata.get("truncated_count"):
         print(f"本文の省略が残っています: {metadata['truncated_count']}件（JSON・Excelの取得情報を確認してください）。", file=sys.stderr)
     if metadata.get("incomplete"):
@@ -577,10 +654,20 @@ def run_collection(args) -> int:
             print(f"未取得: {remaining}件。", file=sys.stderr)
         elif remaining is None:
             print("画面の総件数を確認できませんでした。", file=sys.stderr)
+        elif period and metadata.get("scan_coverage_verified"):
+            print("一覧の件数は照合済みですが、期間境界または日付不明の口コミをExcelで確認してください。", file=sys.stderr)
         else:
             print("保存済みですが、全件取得の完了を確認できませんでした。", file=sys.stderr)
-        if "error" not in metadata and args.url and not metadata["stop_reason"].startswith("ユーザーが中断"):
-            retry = ["google-maps-reviews", args.url, "--all", "--timeout", str(max(1200, args.timeout * 2))]
+        if "error" not in metadata and args.url and not metadata["stop_reason"].startswith("ユーザーが中断") and not metadata.get("scan_coverage_verified"):
+            retry = ["google-maps-reviews", args.url]
+            if period:
+                if args.date_from:
+                    retry += ["--from", args.date_from]
+                if args.date_to:
+                    retry += ["--to", args.date_to]
+            else:
+                retry.append("--all")
+            retry += ["--timeout", str(max(1200, args.timeout * 2))]
             if args.manual:
                 retry.append("--manual")
             if args.no_service:

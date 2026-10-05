@@ -186,7 +186,7 @@ class InstalledCliTest(unittest.TestCase):
                 self.assertEqual(cli.main(["--interactive", "--demo", "--config", str(path)]), 0)
             settings = console.load_settings(path)
             self.assertEqual(settings, {"url": "https://www.google.com/maps/test", "scope": "max", "max": 7,
-                                       "timeout": 45, "delay": 1.5, "output_dir": str(output), "browser": "chrome", "manual": True})
+                                       "timeout": 45, "delay": 1.5, "output_dir": str(output), "browser": "chrome", "manual": True, "date_from": None, "date_to": None})
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
             with patch.object(sys.stdin, "isatty", return_value=False), redirect_stdout(io.StringIO()):
                 self.assertEqual(cli.main(["--use-settings", "--demo", "--max", "3", "--config", str(path)]), 0)
@@ -366,7 +366,7 @@ class LocalServiceCliTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder, patch.object(cli, "collect_from_local_service", return_value=False), \
                 patch("playwright.sync_api.sync_playwright"), patch.object(cli, "collection_browser") as launching, \
                 patch.object(cli, "prepare_reviews"), patch.object(cli, "blocked", return_value=False), \
-                patch.object(cli, "expand_text"), patch.object(cli, "review_scroll_state", return_value={"at_end": True}), \
+                patch.object(cli, "expand_text"), patch.object(cli, "open_full_reviews", return_value=False), patch.object(cli, "reviews_restricted", return_value=False), patch.object(cli, "review_scroll_state", return_value={"at_end": True}), \
                 patch.object(cli, "scroll_reviews") as scrolling, patch.object(cli.time, "sleep"), redirect_stdout(output):
             launching.return_value.__enter__.return_value = context
             self.assertEqual(cli.main([page.url, "--all", "--output-dir", folder]), 0)

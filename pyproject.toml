@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "google-maps-reviews"
-version = "0.5.1"
-description = "Mac専用のGoogleマップ口コミ収集とCodex Skillによる分析レポートCLI。"
+version = "0.6.0"
+description = "Mac専用のGoogleマップ口コミ収集CLIと口コミCSVの分析Skill。"
 license = "MIT"
 license-files = ["LICENSE"]
 classifiers = ["Operating System :: MacOS :: MacOS X", "Programming Language :: Python :: 3", "Environment :: Console"]

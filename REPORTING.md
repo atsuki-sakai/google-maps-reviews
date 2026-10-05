@@ -1,116 +1,94 @@
-# 口コミから事業改善レポート
+# 口コミCSVの分析レポート
 
-URLから口コミを収集し、Codexが本文の意味を読んで分析します。統計とHTML・Excelの生成はプログラムで行い、根拠の引用と口コミIDを照合します。
+収集と分析を分けて使います。CLIはURLから口コミをCSVへ保存し、Skillは渡されたCSVの全行を分析します。Skillがブラウザーを開いたり、過去の別店舗のデータを探したりすることはありません。
 
-## 初回の準備
+## 利用方法
 
-収集CLIの導入は [README](README.md#セットアップ) の1コマンドで行います。続けてSkillを導入してください。
+まず収集します。
+
+```bash
+google-maps-reviews "店舗の共有URL" --all
+# 指定期間だけをCSVへ保存する場合
+google-maps-reviews "店舗の共有URL" --from 2026-01-01 --to 2026-09-30
+```
+
+期間指定では日付の推定範囲全体が期間内の口コミをCSVに保存します。境界・日付不明の口コミは同じExcelの別シートへ保存するので、必要な行を確認してCSVにまとめてから分析してください。Googleの相対日付は正確な投稿日ではありません。
+
+Skillを一度導入します。
 
 ```bash
 google-maps-reviews skill install
 ```
 
-Codexの新しい会話で使えます。
+Codexの新しい会話でCSVのパスを渡します。
 
 ```text
-$google-review-report https://maps.app.goo.gl/店舗の共有URL
+$google-review-report /Users/利用者/Desktop/GoogleMap口コミ/店舗_口コミ_日時.csv
 ```
 
-Skillからの直接実行は現在のモデル・推論設定を使います。時間をかけて分析したい場合は高い推論設定を選んでください。Skillの文章だけで実行中のモデルの推論設定を変更することはできません。
+返信案の要否を開始時に確認します。不要なら返信案・返信方針を作らず、HTMLの返信欄やExcelの返信案シートも出力しません。現在の会話のモデル・推論設定を使い、時間をかけて本文を読みます。Skillの文面だけでは推論設定は変更できないので、高い推論設定を選んで利用してください。別のCodex CLIは自動起動しません。
 
-Skillの導入先は `~/.codex/skills/google-review-report/`（`CODEX_HOME` 指定時はその `skills/`）。`skill install --path "親フォルダー"` で変更できます。本ツールが導入したSkillだけを更新します。CLI更新後に `skill install` を再実行すればSkillも更新できます。
-
-URLだけを渡すと指定施設から新規収集します。収集に失敗しても別店舗の保存済みデータへ切り替えません。既存JSON・分析フォルダーは、そのパスを明示した場合だけ利用します。0.5.0以降のレポート収集はCLI自身の専用Chromeを使い、旧Web用収集サービスに依存しません。
-
-## 返信案の選択
-
-Skillの開始時に返信案が必要か確認します。不要なら返信を生成せず、HTMLの返信欄やコピー操作、Excelの返信案シートも表示しません。ターミナルのreportは既定で返信なしです。必要な場合は `--with-replies` を付けてください。不要を明示する指定は `--no-replies` です。
-
-Excelは1ファイルで、概要・分類済み口コミ・話題別根拠・カテゴリ集計・改善アクション・分析と提案の6シートを持ちます。返信が必要な場合だけ返信案シートを追加します。原文は要約と別列、数値は数値列、各一覧はフィルターと見出し固定付きです。改善アクションの状態は未着手・進行中・完了・保留から選択できます。
-
-## ターミナルの1コマンドで生成
-
-[公式のCodex CLI導入方法](https://developers.openai.com/codex/cli/) に従いCLIを準備し、`codex login` でログインします。追加のAPIキーを前提にしません。
+SkillはCodexの `~/.codex/skills/google-review-report/` に導入します。Claude Codeでも使う場合は、次のコマンドでClaudeの個人用Skillフォルダーに導入できます。
 
 ```bash
-google-maps-reviews report "https://maps.app.goo.gl/店舗の共有URL"
+google-maps-reviews skill install --path "$HOME/.claude/skills"
 ```
 
-既定で推論レベル `xhigh`、Codex CLIの既定モデルを使います。独立した分析実行のためCodexの `config.toml` は読み込みませんが、アカウントのログインは利用します。モデルは `--model モデル名`、推論レベルは `--effort high` で調整できます。指定モデルが使えない場合に低い推論レベルへ自動変更しません。
+Claudeでは `/google-review-report CSVのパス` と指定します。利用環境のSkill読み込みに従い、現在のモデルで分析します。
 
-収集時間の上限は既定20分（`--timeout 1200`）で、AIの分析時間とは別です。分析には件数に応じて時間がかかります。Codexの利用枠を消費し、対象口コミをモデルへ送信します。途中でControl+Cを押すと、保存済みの分析ファイルを残します。
+## 入力CSV
 
-## レポートでできること
+UTF-8（BOM付きも可）のCSVです。収集CLIの出力をそのまま渡せます。必須列は「口コミ本文」「星評価」、または英語名 `text`・`rating`。本文が空欄の行も評価のみとして集計します。口コミIDがない場合はCSV行番号を分析用のIDにします。店舗名・投稿日・既存返信などは任意です。複数施設の混在、不正な評価、ID重複、列数の不一致はエラーにします。
+
+詳細は [CSV入力仕様](src/google_maps_reviews/skills/google-review-report/references/csv-input.md) を参照してください。CSVの行数からGoogleマップの全件取得を断定しません。レポートには「入力CSVの全行を分析」と表示します。
+
+## レポートの内容
 
 | 内容 | 使い道 |
 | --- | --- |
-| 星・本文感情・話題別分布 | 全体像と好評・不満の領域を把握 |
-| 顧客体験の流れ | 来店前・受付・利用・会計などの摩擦と機会を整理 |
-| 強み・課題・原因仮説 | 根拠口コミ、別の説明、現場の確認方法を検討 |
-| 改善の実行計画 | 優先度の理由、担当案、工数、期間、指標、目標案を確認 |
-| 個別の口コミと返信案 | 本文・星・感情・話題で検索し、下書きをコピー |
+| 星・本文感情・話題別分布 | 好評・不満の領域を把握 |
+| 顧客体験の流れ | 来店前・受付・利用・会計などの摩擦を整理 |
+| 強み・課題・原因仮説 | 根拠、別の説明、現場の確認方法を検討 |
+| 改善の実行計画 | 優先順位、担当案、工数、期間、指標、目標案 |
+| 個別の口コミ・任意の返信案 | 本文・星・感情・話題で検索 |
 
-話題別感情分析（ABSA）、顧客体験の整理、仮説検証、影響と実行負荷による優先順位、PDCAを組み合わせます。5 Whysは現場の確認質問に使います。研究・一次資料と限界は [分析方法](src/google_maps_reviews/skills/google-review-report/references/methodology.md) を参照してください。
+話題別感情分析（ABSA）、顧客体験の整理、仮説検証、影響と実行負荷による優先順位、PDCAを組み合わせます。5 Whysは現場の確認質問に使います。研究と限界は [分析方法](src/google_maps_reviews/skills/google-review-report/references/methodology.md) を参照してください。
 
-原因は仮説、担当・期間・目標は提案です。未確認の売上効果、改善済み、返金、アレルギーの安全性などを作りません。口コミは自発的な投稿なので全顧客の満足度・被害率・因果効果を推定しません。分類の確信度はモデルの判断であり、実測の正答率ではありません。
+原因は仮説、担当・期間・目標は提案です。未確認の売上効果や改善済みの主張は作りません。口コミは自発的な投稿であり、全顧客の満足度や因果効果を推定しません。分類の確信度はモデルの判断です。
 
-## 保存されるファイル
+## 出力
 
-デスクトップの `GoogleMap口コミレポート/口コミ分析_日時_識別子/` に保存します。HTMLは外部ライブラリーを読み込まずオフラインで動きます。Excelのリンクを使うため、HTMLとExcelは同じフォルダーに置いてください。
+デスクトップの `GoogleMap口コミレポート/口コミ分析_日時_識別子/` に、オフラインHTMLと1つのExcelを保存します。
 
 ```text
 口コミレポート.html
-口コミ分析.xlsx          概要・原文と分類・根拠・カテゴリ集計・改善計画・分析と提案
-source.json              元の口コミ
+口コミ分析.xlsx          概要・分類済み口コミ・話題別根拠・カテゴリ集計・改善アクション・分析と提案
+source.csv               指定CSVの原本（バイト単位で保持）
+source.json              CSVから変換した解析用データ
 analysis.json            全行の分析
 statistics.json          プログラムで計算した統計
-manifest.json            原文ハッシュ・取得件数・分割ファイル
+manifest.json            原本と解析用データのハッシュ・件数・分割情報
 packets/                 本文ありの20件ずつの分析入力
 annotations/             分析済みの分割ファイル
-codex-analysis.log       CLI分析の実行ログ
 ```
 
-manifestには入力URL（requested_url）、開いた直後の展開先（resolved_url）、取得元URL（source_url）、施設名を記録します。取得中に施設IDが別施設へ変わった場合は収集を止めます。短縮URLと展開後URLは表記が異なるため、URL文字列だけで施設を判定しません。
+返信が必要な場合だけExcelに返信案シートを追加します。原文と要約は別列、数値は数値列、一覧はフィルター・見出し固定付きです。改善アクションの状態を未着手・進行中・完了・保留から選択できます。複数の分析CSVは作りません。
 
-返信案は下書きです。事実、表現、言語、既存返信を確認してから投稿します。自動投稿機能はありません。HTMLは投稿者名を省略しますが、本文に個人情報が含まれる場合があります。Excel・JSON・実行ログには原文や投稿者情報が含まれるため、共有先を選び、公開リポジトリには追加しないでください。
+HTMLとExcelは同じフォルダーに置いてください。原文情報を含むCSV・Excel・JSONを公開リポジトリへ追加しないでください。返信は下書きであり、自動投稿しません。
 
-## 保存済みの口コミと事業情報
+## Skillの補助コマンド
 
-```bash
-# 収集済みJSONから生成。再収集しない
-google-maps-reviews report --input "$HOME/Desktop/GoogleMap口コミ/店舗_口コミ.json"
-
-# 返信案も生成する場合
-google-maps-reviews report "店舗URL" --with-replies
-
-# 確認済みのメニュー・営業時間・返信方針などを反映
-google-maps-reviews report "店舗URL" --context "$HOME/Desktop/事業情報.md"
-
-# 保存場所の指定と、自動で開く動作を止める指定
-google-maps-reviews report "店舗URL" --output-dir "$HOME/Desktop/店舗レポート" --no-open
-```
-
-事業情報は、確認済みの事実・実際の運営方針・返信の希望を書くMarkdownです。口コミから推論した内容を確認済み情報として書かないでください。
-
-## 中断・検証・再生成
+以下はファイル準備・検証・描画だけを行います。意味の分析はSkillが担当します。
 
 ```bash
-# 中断後、保存済みの分析から再開
-google-maps-reviews report resume "保存先"
-
-# Skillが直接分析するための準備だけ実行
-google-maps-reviews report prepare "店舗URL"
-
-# 引用・口コミID・全件分析・構造を検証
+google-maps-reviews report prepare --input "口コミ.csv" --no-replies
+# 返信ありにする場合は --with-replies
+# 確認済み事業情報は --context "事業情報.md"、保存先は --output-dir "空のフォルダー"
 google-maps-reviews report validate "保存先"
-
-# 全行から統計を計算
 google-maps-reviews report stats "保存先"
-
-# 検証済みの分析からHTML・Excelを再生成
 google-maps-reviews report render "保存先" --no-open
 ```
 
-0件、重複ID、未分析行、本文に存在しない引用は生成前にエラーにします。Googleの表示制限で部分取得になった場合は、取得した範囲としてレポートに明記します。取得件数の照合は意味の分析の正しさの保証ではありません。
+中断後はSkillに分析フォルダーを明示して続けてください。有効な既存の分類を保持して残りを分析します。`report URL` や `report resume` による収集・AI自動起動は0.6.0で廃止しました。
 
-エラーや不完全な分析ファイルがある場合は、エラーに書かれたkey・項目をCodexで修正して再検証します。`source.json` を変更するとハッシュが一致しなくなるので、元データを差し替える場合は別のフォルダーでprepareをやり直してください。分析の形式は [schema.md](src/google_maps_reviews/skills/google-review-report/references/schema.md) にあります。
+0件、重複ID、未分析行、本文に存在しない引用は生成前にエラーにします。原本CSVまたはsource.jsonを変更するとハッシュ照合で拒否するため、入力を差し替える場合は新しいフォルダーで準備します。分析の形式は [schema.md](src/google_maps_reviews/skills/google-review-report/references/schema.md) にあります。

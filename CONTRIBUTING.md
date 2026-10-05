@@ -33,7 +33,8 @@ git diff --check
 - `src/google_maps_reviews/console.py`: 対話メニュー、設定、ブラウザーのセットアップ
 - `src/google_maps_reviews/browser.py`: 専用Chromeの起動、同時実行の防止、終了処理
 - `src/google_maps_reviews/extract_reviews.js`: 表示された口コミカードの抽出
-- `src/google_maps_reviews/report_cli.py`: Skill導入、Codex CLI分析の起動、再開
+- `src/google_maps_reviews/dates.py`: 画面日付の範囲推定、期間内・境界・不明の判定
+- `src/google_maps_reviews/report_cli.py`: Skill導入、CSVの準備・検証・描画の補助コマンド
 - `src/google_maps_reviews/reporting.py`: 分類・引用・IDの検証、統計、Excel、HTML生成
 - `src/google_maps_reviews/report_assets/`: 外部通信のないHTMLテンプレート・スタイル・操作
 - `src/google_maps_reviews/skills/google-review-report/`: Skill本文、分析契約、方法の一次資料

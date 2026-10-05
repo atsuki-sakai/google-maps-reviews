@@ -1,4 +1,5 @@
 import io
+import csv
 import json
 import re
 import sys
@@ -10,7 +11,7 @@ from unittest.mock import patch
 
 from openpyxl import load_workbook
 from google_maps_reviews import reporting as r
-from google_maps_reviews import report_cli
+from google_maps_reviews import report_cli, cli
 
 
 class ReportingTest(unittest.TestCase):
@@ -145,7 +146,7 @@ class ReportingTest(unittest.TestCase):
         self.assertEqual(sheet["C2"].data_type, "s")
         self.assertEqual(sheet["I2"].data_type, "s")
         self.assertEqual(sheet.freeze_panes, "A2")
-        self.assertEqual(sheet.auto_filter.ref, "A1:M4")
+        self.assertEqual(sheet.auto_filter.ref, "A1:Q4")
         self.assertEqual(book["返信案"].max_row, 4)
         self.assertEqual(book["カテゴリ集計"]["B2"].data_type, "n")
         book.close()
@@ -176,8 +177,8 @@ class ReportingTest(unittest.TestCase):
         default = self.root / "without-replies"
         enabled = self.root / "with-replies"
         with redirect_stdout(io.StringIO()):
-            report_cli.report_main(["prepare", "--input", str(self.source), "--output-dir", str(default)])
-            report_cli.report_main(["prepare", "--input", str(self.source), "--output-dir", str(enabled), "--with-replies"])
+            report_cli.report_main(["prepare", "--input", str(self.save_csv()), "--output-dir", str(default)])
+            report_cli.report_main(["prepare", "--input", str(self.save_csv()), "--output-dir", str(enabled), "--with-replies"])
         self.assertFalse(r.read_json(default / "manifest.json")["reply_drafts"])
         self.assertTrue(r.read_json(enabled / "manifest.json")["reply_drafts"])
 
@@ -213,82 +214,70 @@ class ReportingTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             r.load_annotations(self.output, require_complete=False)
 
-    def test_codex_child_uses_high_effort_and_own_write_scope(self):
-        command = report_cli.codex_command("/bin/codex", self.output, "xhigh")
-        self.assertIn('model_reasoning_effort="xhigh"', command)
-        self.assertEqual(command[command.index("--sandbox") + 1], "workspace-write")
-        self.assertEqual(command[command.index("--cd") + 1], str(self.output))
-        self.assertNotIn("--model", command)
-        explicit = report_cli.codex_command("/bin/codex", self.output, "high", "chosen-model")
-        self.assertEqual(explicit[explicit.index("--model") + 1], "chosen-model")
+    def save_csv(self, rows=None):
+        path = self.root / "reviews.csv"
+        with path.open("w", encoding="utf-8-sig", newline="") as stream:
+            writer = csv.writer(stream)
+            writer.writerow([title for _, title in cli.FIELDS])
+            for row in rows if rows is not None else self.raw:
+                writer.writerow([row.get(key, "") for key, _ in cli.FIELDS])
+        return path
 
-    def test_missing_codex_fails_before_collection(self):
-        with patch.object(report_cli.shutil, "which", return_value=None), patch.object(report_cli.cli, "run_collection") as collecting, redirect_stdout(io.StringIO()):
-            with self.assertRaises(SystemExit):
-                report_cli.report_main(["https://maps.app.goo.gl/abc"])
-            collecting.assert_not_called()
+    def test_csv_preparation_preserves_original_and_never_collects(self):
+        source = self.save_csv()
+        output = self.root / "csv-analysis"
+        with patch.object(cli, "run_collection", side_effect=AssertionError("no collection")), patch.object(report_cli.subprocess, "Popen", side_effect=AssertionError("no child AI")), redirect_stdout(io.StringIO()):
+            self.assertEqual(report_cli.report_main(["prepare", "--input", str(source), "--output-dir", str(output)]), 0)
+        self.assertEqual((output / "source.csv").read_bytes(), source.read_bytes())
+        manifest, metadata, keys = r.workspace(output)
+        self.assertEqual(len(keys), 3)
+        self.assertEqual(keys["R0001"]["text"], self.raw[0]["text"])
+        self.assertEqual(keys["R0001"]["author"], "=AUTHOR()")
+        self.assertEqual(manifest["coverage"]["input_format"], "csv")
+        self.assertIsNone(manifest["coverage"]["displayed_total"])
+        self.assertFalse(manifest["coverage"]["full_coverage_verified"])
+        (output / "source.csv").write_bytes(b"changed")
+        with self.assertRaisesRegex(ValueError, "入力CSV"):
+            r.workspace(output)
 
-    def test_url_prepare_uses_direct_browser_and_records_only_this_request(self):
-        requested = "https://maps.app.goo.gl/requested-store"
-        resolved = "https://www.google.com/maps/place/Requested/data=!1s0x123:0x456!9m1!1b1"
-        output = self.root / "fresh-request"
-        def collect(args):
-            self.assertTrue(args.no_service)
-            self.assertEqual(args.url, requested)
-            self.assertTrue(args.all)
-            r.write_json(args.output_dir / "new.json", {
-                "metadata": {"place_name": "今回の施設", "requested_url": args.url,
-                             "resolved_url": resolved, "source_url": resolved,
-                             "displayed_total_end": 3, "full_coverage_verified": True},
-                "reviews": self.raw,
-            })
-            return 0
-        with patch.object(report_cli.cli, "run_collection", side_effect=collect), redirect_stdout(io.StringIO()):
-            self.assertEqual(report_cli.report_main(["prepare", requested, "--output-dir", str(output)]), 0)
+    def test_url_report_commands_are_rejected_before_collection(self):
+        with patch.object(cli, "run_collection", side_effect=AssertionError("no collection")), redirect_stderr(io.StringIO()):
+            for arguments in (["https://maps.app.goo.gl/store"], ["prepare", "https://maps.app.goo.gl/store"], ["resume", str(self.output)]):
+                with self.subTest(arguments=arguments), self.assertRaises(SystemExit):
+                    report_cli.report_main(arguments)
+
+    def test_csv_missing_ids_keep_distinct_identical_rows(self):
+        path = self.root / "minimal.csv"
+        path.write_text('rating,text\n5,"良い\n料理"\n5,"良い\n料理"\n4,\n', encoding="utf-8")
+        metadata, rows, _ = r.source_data(path)
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(rows[0]["text"], "良い\n料理")
+        self.assertEqual(len({row["review_id"] for row in rows}), 3)
+        self.assertFalse(rows[2]["text_may_be_truncated"])
+
+    def test_csv_invalid_rows_and_mixed_places_are_rejected(self):
+        path = self.root / "invalid.csv"
+        for text in ('rating,other\n5,hello\n', 'rating,text\n6,hello\n', 'rating,text\n5,hello,extra\n', 'rating,text,text\n5,a,b\n', 'rating,text,review_id\n5,a,same\n4,b,same\n', 'rating,text,place_name\n5,a,A\n4,b,B\n', 'rating,text\n'):
+            with self.subTest(text=text):
+                path.write_text(text, encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    r.source_data(path)
+
+    def test_csv_report_renders_every_row_in_one_workbook(self):
+        source = self.save_csv()
+        output = self.root / "csv-render"
+        r.prepare(source, output, reply_drafts=False)
         manifest = r.read_json(output / "manifest.json")
-        self.assertEqual(manifest["place_name"], "今回の施設")
-        self.assertEqual(manifest["requested_url"], requested)
-        self.assertEqual(manifest["resolved_url"], resolved)
-        self.assertNotEqual(manifest["source_sha256"], self.sha)
-
-    def test_collection_failure_does_not_use_existing_review_or_analysis_files(self):
-        output = self.root / "failed-request"
-        # Both an older source and a valid analysis exist in this test's root.
-        with patch.object(report_cli.cli, "run_collection", return_value=1), \
-                patch.object(report_cli.reporting, "prepare") as preparing, redirect_stderr(io.StringIO()):
-            with self.assertRaisesRegex(ValueError, "指定URL.*収集できません"):
-                report_cli.report_main(["prepare", "https://maps.app.goo.gl/requested-store", "--output-dir", str(output)])
-            preparing.assert_not_called()
-        self.assertFalse((output / "manifest.json").exists())
-        self.assertFalse((output / "source.json").exists())
-        self.assertTrue((self.output / "manifest.json").is_file())
-
-    def test_manual_report_in_a_non_terminal_fails_before_collection(self):
-        with patch.object(report_cli.sys.stdin, "isatty", return_value=False), \
-                patch.object(report_cli.cli, "run_collection") as collecting, redirect_stderr(io.StringIO()):
-            with self.assertRaises(SystemExit) as result:
-                report_cli.report_main(["prepare", "https://maps.app.goo.gl/requested-store", "--manual"])
-            self.assertEqual(result.exception.code, 2)
-            collecting.assert_not_called()
-
-    def test_prepare_rejects_a_different_request_or_a_changed_place(self):
-        requested = "https://maps.app.goo.gl/requested-store"
-        resolved = "https://www.google.com/maps/place/Requested/data=!1s0x123:0x456!9m1!1b1"
-        other = "https://www.google.com/maps/place/Other/data=!1s0x789:0xabc!9m1!1b1"
-        for metadata in (
-            {"requested_url": "https://maps.app.goo.gl/other-store", "resolved_url": resolved, "source_url": resolved},
-            {"requested_url": requested, "resolved_url": resolved, "source_url": other},
-        ):
-            with self.subTest(metadata=metadata), tempfile.TemporaryDirectory() as folder:
-                output = Path(folder) / "report"
-                def collect(args):
-                    r.write_json(args.output_dir / "unexpected.json", {"metadata": metadata, "reviews": self.raw})
-                    return 0
-                with patch.object(report_cli.cli, "run_collection", side_effect=collect), redirect_stdout(io.StringIO()):
-                    with self.assertRaises(ValueError):
-                        report_cli.report_main(["prepare", requested, "--output-dir", str(output)])
-                self.assertFalse((output / "manifest.json").exists())
-                self.assertFalse((output / "source.json").exists())
+        r.write_json(output / "annotations" / "batch-001.json", {"source_sha256": manifest["source_sha256"], "reviews": self.annotations})
+        synthesis = dict(self.synthesis, source_sha256=manifest["source_sha256"])
+        r.write_json(output / "synthesis.json", synthesis)
+        html = r.render(output).read_text()
+        self.assertIn("入力CSVの全", html)
+        book = load_workbook(output / "口コミ分析.xlsx")
+        self.assertEqual(len(book.sheetnames), 6)
+        self.assertEqual(book["分類済み口コミ"].max_row, 4)
+        self.assertEqual(book["分類済み口コミ"]["D2"].value, 5)
+        book.close()
 
     def test_skill_install_updates_own_skill_and_refuses_foreign_skill(self):
         parent = self.root / "skills"
@@ -299,13 +288,6 @@ class ReportingTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "上書き"):
             report_cli.install_skill(parent)
 
-    def test_successful_codex_exit_without_analysis_is_not_success(self):
-        (self.output / "annotations" / "batch-001.json").unlink()
-        command = [sys.executable, "-c", "import sys; sys.stdin.read()"]
-        with patch.object(report_cli.shutil, "which", return_value=sys.executable), patch.object(report_cli, "codex_command", return_value=command), redirect_stdout(io.StringIO()):
-            with self.assertRaisesRegex(ValueError, "未分析"):
-                report_cli.analyze(self.output, "xhigh")
-        self.assertFalse((self.output / "口コミレポート.html").exists())
 
 
 if __name__ == "__main__":

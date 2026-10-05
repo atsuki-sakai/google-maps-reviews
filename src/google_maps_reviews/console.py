@@ -12,6 +12,7 @@ import tempfile
 from pathlib import Path
 
 from . import cli
+from .dates import iso_date
 
 
 def config_path(value: Path | None = None) -> Path:
@@ -20,7 +21,8 @@ def config_path(value: Path | None = None) -> Path:
 
 def default_settings() -> dict:
     return {"url": "", "scope": "max", "max": 100, "timeout": 300, "delay": 2.0,
-            "output_dir": str(Path.home() / "Desktop" / "GoogleMap口コミ"), "browser": "chrome", "manual": False}
+            "output_dir": str(Path.home() / "Desktop" / "GoogleMap口コミ"), "browser": "chrome", "manual": False,
+            "date_from": None, "date_to": None}
 
 
 def validate_settings(settings: dict) -> dict:
@@ -32,7 +34,7 @@ def validate_settings(settings: dict) -> dict:
         raise ValueError("URLと保存先の設定を確認してください。")
     if result["url"]:
         cli.maps_url(result["url"])
-    if result["scope"] not in ("all", "max", "visible") or result["browser"] not in ("chrome", "chromium") or type(result["manual"]) is not bool:
+    if result["scope"] not in ("all", "max", "visible", "period") or result["browser"] not in ("chrome", "chromium") or type(result["manual"]) is not bool:
         raise ValueError("収集範囲とブラウザーの設定を確認してください。")
     for key in ("max", "timeout"):
         if type(result[key]) is not int:
@@ -41,6 +43,16 @@ def validate_settings(settings: dict) -> dict:
     if isinstance(result["delay"], bool) or not isinstance(result["delay"], (int, float)):
         raise ValueError("待機時間には数値を指定してください。")
     result["delay"] = cli.positive_seconds(str(result["delay"]))
+    for key in ("date_from", "date_to"):
+        if result[key] is not None:
+            if not isinstance(result[key], str):
+                raise ValueError("日付はYYYY-MM-DD形式で指定してください。")
+            result[key] = iso_date(result[key])
+    if result["scope"] == "period":
+        if not result["date_from"] and not result["date_to"]:
+            raise ValueError("期間の開始日または終了日が必要です。")
+        if result["date_from"] and result["date_to"] and result["date_from"] > result["date_to"]:
+            raise ValueError("開始日は終了日以前を指定してください。")
     return result
 
 
@@ -98,9 +110,13 @@ def edit_settings(current: dict) -> dict:
     settings["url"] = prompt("店舗URL（未指定ならブラウザーで選択）", settings["url"],
                              lambda value: "" if value in ("", "-") else cli.maps_url(value))
     settings["scope"] = choose("収集範囲", {"1": ("全件を目指す（取得の保証はありません）", "all"),
-                                        "2": ("最大件数を指定", "max"), "3": ("現在読み込まれた口コミのみ", "visible")}, settings["scope"])
+                                        "2": ("最大件数を指定", "max"), "3": ("現在読み込まれた口コミのみ", "visible"),
+                                        "4": ("期間を指定", "period")}, settings["scope"])
     if settings["scope"] == "max":
         settings["max"] = prompt("最大保存件数", settings["max"], cli.positive_int)
+    if settings["scope"] == "period":
+        settings["date_from"] = prompt("開始日（YYYY-MM-DD）", settings["date_from"] or "", iso_date)
+        settings["date_to"] = prompt("終了日（YYYY-MM-DD、空欄は取得日）", settings["date_to"] or "", lambda value: iso_date(value) if value else None)
     settings["timeout"] = prompt("収集の制限時間（秒、手動操作時間を除く）", settings["timeout"], cli.positive_int)
     settings["delay"] = prompt("スクロール後の待機時間（0.5〜60秒）", settings["delay"], cli.positive_seconds)
     settings["output_dir"] = prompt("保存先", settings["output_dir"], lambda value: str(Path(value).expanduser()))
@@ -112,7 +128,7 @@ def edit_settings(current: dict) -> dict:
 
 
 def apply_settings(args, settings: dict, argv: list[str]):
-    destinations = ("url", "max", "timeout", "delay", "output_dir", "browser", "manual", "all", "visible_only")
+    destinations = ("url", "max", "timeout", "delay", "output_dir", "browser", "manual", "all", "visible_only", "date_from", "date_to")
     specified_parser = cli.build_parser()
     specified_parser.set_defaults(**dict.fromkeys(destinations))
     # Reuse argparse's option resolution so accepted abbreviations remain explicit.
@@ -123,9 +139,11 @@ def apply_settings(args, settings: dict, argv: list[str]):
     for key in ("max", "timeout", "delay", "output_dir", "browser", "manual"):
         if key not in explicit:
             setattr(args, key, Path(settings[key]) if key == "output_dir" else settings[key])
-    if not explicit & {"all", "max", "visible_only"}:
+    if not explicit & {"all", "max", "visible_only", "date_from", "date_to"}:
         args.all = settings["scope"] == "all"
         args.visible_only = settings["scope"] == "visible"
+        if settings["scope"] == "period":
+            args.date_from, args.date_to = settings["date_from"], settings["date_to"]
     return args
 
 
@@ -159,30 +177,18 @@ def interactive_menu(args, path: Path, argv: list[str]) -> int:
     apply_settings(args, current, argv)
     current.update(url=args.url or "", max=args.max, timeout=args.timeout, delay=args.delay,
                    output_dir=str(args.output_dir), browser=args.browser, manual=args.manual,
-                   scope="all" if args.all else "visible" if args.visible_only else "max")
+                   date_from=args.date_from, date_to=args.date_to,
+                   scope="period" if args.date_from or args.date_to else "all" if args.all else "visible" if args.visible_only else "max")
     last_code = 0
     while True:
         action = choose("\nGoogleマップ口コミ収集", {"1": ("口コミを収集", "collect"), "2": ("設定を変更して保存", "settings"),
                                              "3": ("ブラウザーをセットアップ", "setup"), "4": ("終了", "exit"),
-                                             "5": ("口コミ分析レポートを生成", "report"), "6": ("Codexの分析Skillを導入", "skill")}, "collect")
+                                             "5": ("CSV分析Skillを導入", "skill")}, "collect")
         if action == "exit":
             return last_code
         if action == "skill":
             from .report_cli import skill_main
             last_code = skill_main(["install"])
-            continue
-        if action == "report":
-            from .report_cli import report_main
-            url = prompt("店舗の共有URL", current["url"], cli.maps_url)
-            effort = choose("分析の推論レベル", {"1": ("さらに深く検討する（時間をかける）", "xhigh"),
-                                                   "2": ("深く検討する", "high")}, "xhigh")
-            context = prompt("確認済みの事業情報Markdown（任意）", "")
-            options = [url, "--effort", effort, "--browser", current["browser"], "--timeout", str(max(1200, current["timeout"]))]
-            if current["manual"]:
-                options.append("--manual")
-            if context:
-                options += ["--context", context]
-            last_code = report_main(options)
             continue
         if action == "setup":
             browser = choose("準備するブラウザー", {"1": ("既存Chromeを確認（ダウンロードなし）", "chrome"),
@@ -240,6 +246,18 @@ def dispatch(argv: list[str], parser) -> int:
             return interactive_menu(args, path, argv)
         if args.use_settings:
             apply_settings(args, load_settings(path), argv)
+        specified = cli.build_parser()
+        specified.set_defaults(max=None)
+        explicit = specified.parse_args(argv)
+        if args.date_from or args.date_to:
+            if args.all or args.visible_only or explicit.max is not None:
+                parser.error("期間指定は--all、--max、--visible-onlyと同時に指定できません。")
+            if args.date_from and args.date_to and args.date_from > args.date_to:
+                parser.error("開始日は終了日以前を指定してください。")
+            if args.date_from and not args.date_to:
+                from datetime import date
+                if args.date_from > date.today().isoformat():
+                    parser.error("開始日は取得日以前を指定してください。")
         if args.all and args.visible_only:
             parser.error("--allと--visible-onlyは同時に指定できません。")
         if not args.demo and not sys.stdin.isatty() and (args.manual or not args.url):
