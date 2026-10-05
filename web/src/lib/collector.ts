@@ -18,6 +18,8 @@ export async function prepareReviews(page: Page, isCancelled: () => boolean) {
   const deadline = Date.now() + 30000;
   const cards = page.locator(cardsSelector);
   const sort = page.getByRole('button', { name: /並べ替え|sort/i }).first();
+  let reloaded = false;
+  if (page.url().includes('!9m1!1b1') && await sort.isVisible() && await cards.count()) return;
   while (!isCancelled() && Date.now() < deadline) {
     for (const role of ['tab', 'button'] as const) {
       const candidates = page.getByRole(role, { name: /クチコミ|口コミ|レビュー|reviews?/i });
@@ -36,7 +38,19 @@ export async function prepareReviews(page: Page, isCancelled: () => boolean) {
           await sort.waitFor({ state: 'visible', timeout: Math.min(8000, Math.max(1, deadline - Date.now())) });
           await cards.first().waitFor({ state: 'visible', timeout: Math.min(8000, Math.max(1, deadline - Date.now())) });
           return;
-        } catch { /* Another visible review entry may still become available. */ }
+        } catch {
+          // A SPA transition can leave only the review heading loaded. Reload
+          // the actual review view once, preserving the current place and profile.
+          if (!reloaded && !isCancelled() && page.url().includes('!9m1!1b1') && await sort.isVisible()) {
+            reloaded = true;
+            try {
+              await page.reload({ waitUntil: 'domcontentloaded', timeout: 15000 });
+              await sort.waitFor({ state: 'visible', timeout: 8000 });
+              await cards.first().waitFor({ state: 'visible', timeout: 8000 });
+              return;
+            } catch { /* Existing restriction and cancellation checks still apply. */ }
+          }
+        }
       }
     }
     if (!await cards.count()) await checkMapsRestriction(page);
@@ -87,31 +101,45 @@ export async function collectReviews(url: string, emit: (event: CollectionEvent)
     emit({ type: 'status', message: '口コミを読み込み、本文の省略を展開しています。' });
     const started = Date.now();
     const expanded = new Set<string>();
+    let finalExpansionPasses = 0;
     let stalled = 0;
     while (!cancelled && Date.now() - started < timeoutMs) {
       const before = rows.size;
       const cards = page.locator(cardsSelector);
       // Read IDs in one browser call. Revisiting every old card through CDP on
       // every page used most of the time budget on large review lists.
-      const candidates = await cards.evaluateAll(elements => elements.map((card, index) => ({
-        id: card.getAttribute('data-review-id'), index,
+      const candidates = await cards.evaluateAll(elements => elements.map(card => ({
+        id: card.getAttribute('data-review-id'),
+        selector: '[data-review-id=' + CSS.escape(card.getAttribute('data-review-id') || '') + ']',
       })));
-      for (const { id, index } of candidates) {
+      for (const { id, selector } of candidates) {
+        if (cancelled || Date.now() - started >= timeoutMs) break;
         if (!id || expanded.has(id)) continue;
-        const card = cards.nth(index);
+        const card = page.locator(cardsSelector + selector);
         const more = card.getByRole('button', { name: /^(もっと見る|全文を表示|More|See more|Read more)$/i });
         if (await more.count()) {
           try { await more.first().click({ timeout: 2500 }); } catch { /* A remaining button is reported in the exported row. */ }
         }
-        expanded.add(id);
       }
       const data = await page.evaluate('(' + extractorSource + ')()') as Extracted;
+      // A failed click or a late More button must be retried on the next pass.
+      for (const row of data.reviews) {
+        if (row.text_may_be_truncated) expanded.delete(row.review_id);
+        else expanded.add(row.review_id);
+      }
       mergeReviews(rows, data.reviews);
       if (data.reviews.length && !rows.size) throw new PublicCollectionError('口コミの投稿者または評価を読み取れません。表示形式の対応が必要です。');
       result = { place: data.place_name, sourceUrl: data.source_url, displayedTotal: data.displayed_total ?? result.displayedTotal,
         reviews: [...rows.values()], verified: false, reason: '' };
       emit({ type: 'progress', data: result });
       if (isFullCoverage(result.reviews, result.displayedTotal)) {
+        const remaining = result.reviews.filter(row => row.text_may_be_truncated).length;
+        if (remaining && finalExpansionPasses < 3 && Date.now() - started < timeoutMs) {
+          finalExpansionPasses++;
+          emit({ type: 'status', message: `件数照合済み。省略が残る本文${remaining}件を再展開しています（${finalExpansionPasses}/3）。` });
+          await page.waitForTimeout(300);
+          continue;
+        }
         result.reason = '画面の総件数と重複なしの保存件数が一致したため終了しました。';
         break;
       }

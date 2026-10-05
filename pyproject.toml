@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "google-maps-reviews"
-version = "0.3.1"
-description = "Mac専用のGoogleマップ口コミ収集CLI。CSV・Excel・JSONに保存します。"
+version = "0.4.0"
+description = "Mac専用のGoogleマップ口コミ収集とCodex Skillによる分析レポートCLI。"
 license = "MIT"
 license-files = ["LICENSE"]
 classifiers = ["Operating System :: MacOS :: MacOS X", "Programming Language :: Python :: 3", "Environment :: Console"]
@@ -24,4 +24,4 @@ Issues = "https://github.com/atsuki-sakai/google-maps-reviews/issues"
 where = ["src"]
 
 [tool.setuptools.package-data]
-google_maps_reviews = ["extract_reviews.js"]
+google_maps_reviews = ["extract_reviews.js", "report_assets/*.html", "report_assets/*.css", "report_assets/*.js", "skills/google-review-report/SKILL.md", "skills/google-review-report/agents/*.yaml", "skills/google-review-report/references/*.md"]

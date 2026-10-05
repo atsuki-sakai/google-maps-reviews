@@ -31,6 +31,10 @@ git diff --check
 - `src/google_maps_reviews/console.py`: 対話メニュー、設定、ブラウザーのセットアップ
 - `src/google_maps_reviews/browser.py`: 専用Chromeの起動、同時実行の防止、終了処理
 - `src/google_maps_reviews/extract_reviews.js`: 表示された口コミカードの抽出
+- `src/google_maps_reviews/report_cli.py`: Skill導入、Codex CLI分析の起動、再開
+- `src/google_maps_reviews/reporting.py`: 分類・引用・IDの検証、統計、CSV、HTML生成
+- `src/google_maps_reviews/report_assets/`: 外部通信のないHTMLテンプレート・スタイル・操作
+- `src/google_maps_reviews/skills/google-review-report/`: Skill本文、分析契約、方法の一次資料
 - `install-cli.py`: GitHub認証不要のMac用インストーラー
 - `tests/`: インストーラー、CLI、出力の回帰テスト
 - `web/`: ツールの説明ページと旧版のローカル収集サービスの互換コード。CLIの導入・通常利用には不要
@@ -38,6 +42,8 @@ git diff --check
 説明ページを編集するときだけNode.js 22で `cd web && npm ci` を実行し、`npm run lint`、`npm test`、`npm run build` を確認してください。公開された画面から口コミを収集する機能はありません。GitHub Actionsは使用しません。
 
 ## 不具合報告
+
+分析を変更した場合、引用の一致、全行のID対応、評価のみを含む統計の母数、星と本文の独立、部分取得の表示、HTML/CSVの文字列処理を確認してください。架空データのレンダリングテストと実データの意味の分析は区別します。実店舗の口コミ、投稿者情報、分析ログ、レポートはリポジトリに追加しません。
 
 macOS・Python・Chrome・ツールのバージョン、実行したオプション、表示された件数と停止理由を添えてください。URLは公開店舗のURLだけを記載します。口コミの本文、投稿者情報、Cookie、ブラウザープロファイル、認証情報を添付しないでください。
 

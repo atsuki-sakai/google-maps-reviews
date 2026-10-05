@@ -16,6 +16,17 @@ test('重複を除き、展開済みの長い本文を保持する', () => {
   assert.equal(rows.size, 1); assert.equal(rows.get(row.review_id)?.text, row.text);
   assert.equal(rows.get(row.review_id)?.text_may_be_truncated, false);
 });
+test('長い省略表示より短い展開済み本文を優先し、再度の省略表示でも戻さない', () => {
+  const rows = new Map<string, Review>();
+  const collapsed = { ...row, text: '全文…もっと見る・表示上の追加ラベル', text_may_be_truncated: true };
+  const complete = { ...row, text: '全文', text_may_be_truncated: false };
+  mergeReviews(rows, [collapsed]); mergeReviews(rows, [complete]);
+  assert.equal(rows.get(row.review_id)?.text, '全文');
+  assert.equal(rows.get(row.review_id)?.text_may_be_truncated, false);
+  mergeReviews(rows, [collapsed]); mergeReviews(rows, [{ ...complete, text: '' }]);
+  assert.equal(rows.get(row.review_id)?.text, '全文');
+  assert.equal(rows.get(row.review_id)?.text_may_be_truncated, false);
+});
 test('表示6件と取得7件を全件確認済みにしない', () => {
   const rows = Array.from({ length: 7 }, (_, i) => ({ ...row, review_id: String(i) }));
   assert.equal(isFullCoverage(rows, 6), false); assert.equal(isFullCoverage(rows, 7), true);
@@ -54,7 +65,8 @@ function mockCollectionPage(t: TestContext, options: {
   const cardCount = () => opened ? reviews().length : options.overviewCount || 0;
   const cards = {
     async count() { return cardCount(); },
-    async evaluateAll() { return reviews().map((review, index) => ({ id: review.review_id, index })); },
+    async evaluateAll() { return reviews().map(review => ({ id: review.review_id, selector: `[data-review-id=${review.review_id}]` })); },
+    getByRole: () => ({ async count() { return 0; } }),
     first: () => ({
       async waitFor() { if (!cardCount()) throw new Error('DUMMY_REVIEW_SECRET'); },
       async evaluate() { return { total: 100, height: 40, atEnd: options.atEnd ?? true, x: 10, y: 10 }; },
@@ -66,6 +78,7 @@ function mockCollectionPage(t: TestContext, options: {
   };
   const page = {
     setDefaultTimeout() {},
+    url: () => 'https://www.google.com/maps/test',
     async goto() {},
     getByRole: (role: string, optionsForRole?: { name?: RegExp }) => {
       if (role === 'main') return { first: () => ({ async waitFor() {} }) };
@@ -315,5 +328,7 @@ test('本文省略のフラグは保持し、verifiedは全件数確認として
     assert.equal(done.data.verified, true);
     assert.equal(done.data.reviews[0].text_may_be_truncated, true);
   }
+  assert.equal(fixture.elapsed(), 900);
+  assert.equal(events.filter(event => event.type === 'status' && /再展開/.test(event.message)).length, 3);
   assert.deepEqual(fixture.closed, ['collection-page', 'disconnect']);
 });

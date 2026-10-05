@@ -70,8 +70,14 @@ def merge_reviews(existing: dict, rows: list[dict], place: str, url: str) -> int
             json.dumps([row.get(k) for k in ("author", "rating", "date_text")], ensure_ascii=False).encode()
         ).hexdigest()
         old = existing.get(key)
-        # Keep an already expanded body when a later virtualized card is collapsed.
-        if old and len(old.get("text", "")) > len(row.get("text", "")):
+        # Expanded text takes precedence over length: a collapsed view may
+        # include extra labels and be longer than the actual expanded body.
+        old_text = old.get("text", "") if old else ""
+        next_text = row.get("text", "")
+        old_truncated = bool(old and old.get("text_may_be_truncated"))
+        next_truncated = bool(row.get("text_may_be_truncated"))
+        if old_text and (not next_text or (not old_truncated and next_truncated)
+                         or (old_truncated == next_truncated and len(old_text) > len(next_text))):
             row["text"] = old["text"]
             row["text_may_be_truncated"] = old.get("text_may_be_truncated", False)
         if old and len(old.get("owner_reply", "")) > len(row.get("owner_reply", "")):
@@ -172,6 +178,9 @@ def prepare_reviews(page, manual: bool):
         # Even the overview can contain preview cards and a sort button.
         # Wait for the delayed review entry and select it before extracting.
         deadline = time.monotonic() + 30
+        reloaded = False
+        if "!9m1!1b1" in page.url and sort.is_visible() and page.locator(REVIEW_CARD_SELECTOR).count():
+            return
         while time.monotonic() < deadline:
             for role in ("tab", "button"):
                 target = page.get_by_role(role, name=re.compile(r"口コミ|クチコミ|レビュー|reviews?", re.I))
@@ -190,6 +199,17 @@ def prepare_reviews(page, manual: bool):
                         page.locator(REVIEW_CARD_SELECTOR).first.wait_for(state="visible", timeout=8000)
                         return
                     except Exception:
+                        # A Maps SPA transition can update the review URL and
+                        # heading without loading its cards. Reload that view once.
+                        if not reloaded and "!9m1!1b1" in page.url and sort.is_visible():
+                            reloaded = True
+                            try:
+                                page.reload(wait_until="domcontentloaded", timeout=15000)
+                                sort.wait_for(state="visible", timeout=8000)
+                                page.locator(REVIEW_CARD_SELECTOR).first.wait_for(state="visible", timeout=8000)
+                                return
+                            except Exception:
+                                pass
                         continue
             page.wait_for_timeout(500)
     body = page.locator("body").inner_text(timeout=3000)
@@ -208,13 +228,19 @@ def prepare_reviews(page, manual: bool):
     page.locator(REVIEW_CARD_SELECTOR).first.wait_for(state="visible", timeout=15000)
 
 
-def expand_text(page, processed: set[str]):
+def expand_text(page, processed: set[str], deadline: float | None = None):
     cards = page.locator(REVIEW_CARD_SELECTOR)
-    ids = cards.evaluate_all("cards => cards.map(card => card.getAttribute('data-review-id'))")
-    for index, review_id in enumerate(ids):
-        card = cards.nth(index)
+    candidates = cards.evaluate_all("""cards => cards.map(card => ({
+        id: card.getAttribute('data-review-id'),
+        selector: '[data-review-id=' + CSS.escape(card.getAttribute('data-review-id') || '') + ']'
+    }))""")
+    for candidate in candidates:
+        if deadline is not None and time.monotonic() >= deadline:
+            break
+        review_id = candidate["id"]
         if not review_id or review_id in processed:
             continue
+        card = page.locator(REVIEW_CARD_SELECTOR + candidate["selector"])
         buttons = card.get_by_role("button", name=re.compile(r"^(もっと見る|全文を表示|More|See more|Read more)$", re.I))
         for button_index in range(buttons.count()):
             try:
@@ -224,8 +250,7 @@ def expand_text(page, processed: set[str]):
             except Exception:
                 # Preserve partial text and record the remaining More button.
                 continue
-        if review_id:
-            processed.add(review_id)
+        # Cache only after extraction verifies that no collapsed text remains.
 
 
 def review_scroll_state(page) -> dict:
@@ -280,7 +305,7 @@ def blocked(page) -> bool:
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(prog="google-maps-reviews", description="Googleマップの表示された口コミを読み取り、CSV・Excel・JSONに保存します。無引数で対話メニューを開きます。", epilog="準備: google-maps-reviews setup --browser chromium / 設定: google-maps-reviews settings show")
+    parser = argparse.ArgumentParser(prog="google-maps-reviews", description="Googleマップの口コミを収集し、CSV・Excel・JSONに保存します。無引数で対話メニューを開きます。", epilog="準備: setup --browser chrome / 設定: settings show / 分析レポート: report 店舗URL / Skill導入: skill install（すべてgoogle-maps-reviewsに続けて指定）")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("url", nargs="?", type=maps_url, help="店舗URL。省略時はブラウザーで店舗を選択")
     scope = parser.add_mutually_exclusive_group()
@@ -409,13 +434,19 @@ def run_collection(args) -> int:
                     started = time.monotonic()
                     stagnant = 0
                     expanded_ids = set()
+                    final_expansion_passes = 0
                     last_progress = None
                     while True:
                         if blocked(page):
                             metadata["stop_reason"] = "確認画面のため停止"
                             break
-                        expand_text(page, expanded_ids)
+                        expand_text(page, expanded_ids, deadline=started + args.timeout)
                         data = page.evaluate(extractor)
+                        for row in data["reviews"]:
+                            if row.get("text_may_be_truncated"):
+                                expanded_ids.discard(row["review_id"])
+                            else:
+                                expanded_ids.add(row["review_id"])
                         place = data["place_name"] or metadata.get("place_name") or "店舗名取得不可"
                         metadata.update(place_name=place, source_url=data["source_url"])
                         if data.get("displayed_total") is not None:
@@ -435,6 +466,12 @@ def run_collection(args) -> int:
                             metadata["stop_reason"] = "現在読み込まれた口コミのみ保存"
                             break
                         if full_coverage_verified(list(reviews.values()), metadata.get("displayed_total_end")):
+                            remaining = sum(bool(row.get("text_may_be_truncated")) for row in reviews.values())
+                            if remaining and final_expansion_passes < 3 and time.monotonic() - started < args.timeout:
+                                final_expansion_passes += 1
+                                print(f"件数照合済み。省略が残る本文{remaining}件を再展開しています（{final_expansion_passes}/3）。", flush=True)
+                                page.wait_for_timeout(300)
+                                continue
                             metadata["stop_reason"] = "画面の総件数と重複なしの保存件数が一致したため終了しました。"
                             break
                         if time.monotonic() - started >= args.timeout:

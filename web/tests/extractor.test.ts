@@ -1,9 +1,48 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { chromium } from 'playwright-core';
-import type { Review } from '../src/lib/reviews';
+import { chromium, type Browser } from 'playwright-core';
+import type { Review, CollectionEvent } from '../src/lib/reviews';
 import { extractorSource } from '../src/lib/extractor';
-import { prepareReviews } from '../src/lib/collector';
+import { collectReviews, prepareReviews } from '../src/lib/collector';
+
+test('件数照合後も展開が反映されなかった本文を再試行してから保存する', async (t) => {
+  const browser = await chromium.launch({ channel: 'chrome', headless: true });
+  const previous = process.env.BROWSER_CDP_URL;
+  process.env.BROWSER_CDP_URL = 'http://browser.invalid';
+  t.after(() => {
+    if (previous === undefined) delete process.env.BROWSER_CDP_URL;
+    else process.env.BROWSER_CDP_URL = previous;
+  });
+  try {
+    const context = await browser.newContext();
+    await context.route('https://maps.test/**', route => route.fulfill({ contentType: 'text/html; charset=utf-8', body:
+      `<main role="main" aria-label="架空のテスト店舗"><p>1 件のクチコミ</p><button>並べ替え</button>
+      <div data-review-id="retry"><div class="d4r55">テスト投稿者</div><span role="img" aria-label="4 つ星"></span>
+      <div class="MyEned"><span id="text" class="wiI7pd">省略された本文</span><button aria-label="もっと見る" id="expand">もっと見る</button></div></div>
+      </main><script>window.expansionClicks=0;document.getElementById('expand').onclick=()=>{
+        if(++window.expansionClicks<2)return;
+        document.getElementById('text').textContent='展開された全文を保存するためのテストです。';
+        document.getElementById('expand').remove();
+      }</script>` }));
+    let clicks = 0;
+    const originalNewPage = context.newPage.bind(context);
+    const connection = { contexts: () => [{ newPage: async () => {
+      const page = await originalNewPage();
+      const originalClose = page.close.bind(page);
+      page.close = async () => { clicks = await page.evaluate('window.expansionClicks'); await originalClose(); };
+      return page;
+    } }], close: async () => {} } as unknown as Browser;
+    t.mock.method(chromium, 'connectOverCDP', async () => connection);
+    const events: CollectionEvent[] = [];
+    await collectReviews('https://maps.test/place/data=!9m1!1b1', event => events.push(event), new AbortController().signal);
+    const done = events.at(-1);
+    if (done?.type !== 'done') assert.fail('完了イベントがありません');
+    assert.equal(done.data.verified, true);
+    assert.equal(done.data.reviews[0].text_may_be_truncated, false);
+    assert.equal(done.data.reviews[0].text, '展開された全文を保存するためのテストです。');
+    assert.equal(clicks, 2);
+  } finally { await browser.close(); }
+});
 
 test('実ブラウザーのDOMから通常形式と宿泊施設形式を読み取る', async () => {
   const browser = await chromium.launch({ channel: 'chrome', headless: true });
@@ -36,5 +75,27 @@ test('一覧への切り替え中に残るプレビュー3件を全件一覧と�
     await prepareReviews(page, () => false);
     assert.equal(await page.getByRole('button', { name: '並べ替え' }).isVisible(), true);
     assert.equal(await page.locator('[data-review-id]').count(), 30);
+  } finally { await browser.close(); }
+});
+
+test('共有URLから口コミ見出しだけに切り替わった場合は再読み込みして一覧を開く', async () => {
+  const browser = await chromium.launch({ channel: 'chrome', headless: true });
+  try {
+    const page = await browser.newPage();
+    let loads = 0;
+    await page.route('https://maps.test/**', route => {
+      loads++;
+      return route.fulfill({ contentType: 'text/html; charset=utf-8', body: loads === 1
+        ? `<button role="tab" id="reviews">クチコミ</button><script>
+          document.getElementById('reviews').onclick=()=>{
+            history.pushState({},'', '/place/data=!9m1!1b1');
+            document.body.innerHTML='<button>並べ替え</button>';
+          };</script>`
+        : '<button>並べ替え</button><div data-review-id="real-list">一覧の口コミ</div>' });
+    });
+    await page.goto('https://maps.test/place/overview');
+    await prepareReviews(page, () => false);
+    assert.equal(loads, 2);
+    assert.equal(await page.locator('[data-review-id]').count(), 1);
   } finally { await browser.close(); }
 });

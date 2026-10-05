@@ -163,9 +163,27 @@ def interactive_menu(args, path: Path, argv: list[str]) -> int:
     last_code = 0
     while True:
         action = choose("\nGoogleマップ口コミ収集", {"1": ("口コミを収集", "collect"), "2": ("設定を変更して保存", "settings"),
-                                             "3": ("ブラウザーをセットアップ", "setup"), "4": ("終了", "exit")}, "collect")
+                                             "3": ("ブラウザーをセットアップ", "setup"), "4": ("終了", "exit"),
+                                             "5": ("口コミ分析レポートを生成", "report"), "6": ("Codexの分析Skillを導入", "skill")}, "collect")
         if action == "exit":
             return last_code
+        if action == "skill":
+            from .report_cli import skill_main
+            last_code = skill_main(["install"])
+            continue
+        if action == "report":
+            from .report_cli import report_main
+            url = prompt("店舗の共有URL", current["url"], cli.maps_url)
+            effort = choose("分析の推論レベル", {"1": ("さらに深く検討する（時間をかける）", "xhigh"),
+                                                   "2": ("深く検討する", "high")}, "xhigh")
+            context = prompt("確認済みの事業情報Markdown（任意）", "")
+            options = [url, "--effort", effort, "--browser", current["browser"], "--timeout", str(max(1200, current["timeout"]))]
+            if current["manual"]:
+                options.append("--manual")
+            if context:
+                options += ["--context", context]
+            last_code = report_main(options)
+            continue
         if action == "setup":
             browser = choose("準備するブラウザー", {"1": ("既存Chromeを確認（ダウンロードなし）", "chrome"),
                                                    "2": ("Chromiumを利用者領域にダウンロード", "chromium")}, current["browser"])
@@ -184,6 +202,9 @@ def interactive_menu(args, path: Path, argv: list[str]) -> int:
 
 def dispatch(argv: list[str], parser) -> int:
     try:
+        if argv and argv[0] in ("report", "skill"):
+            from .report_cli import report_main, skill_main
+            return (report_main if argv[0] == "report" else skill_main)(argv[1:])
         if argv and argv[0] in ("setup", "settings"):
             command = argv[0]
             subparser = argparse.ArgumentParser(prog=f"google-maps-reviews {command}")

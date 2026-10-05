@@ -1,6 +1,6 @@
 # google-maps-reviews
 
-**Mac専用のGoogleマップ口コミ収集CLI。** 店舗URLを指定すると、専用ブラウザーに表示された口コミを収集して、デスクトップへCSV・Excel・JSONを保存します。MITライセンスのOSSです。
+**Mac専用のGoogleマップ口コミ収集・分析CLI。** 店舗URLを指定すると、専用ブラウザーに表示された口コミを収集して、デスクトップへCSV・Excel・JSONを保存します。CodexのSkillと連携し、分類・返信案・改善計画を含むHTMLレポートも生成できます。MITライセンスのOSSです。
 
 ```bash
 google-maps-reviews "https://maps.app.goo.gl/店舗の共有URL" --all
@@ -8,10 +8,12 @@ google-maps-reviews "https://maps.app.goo.gl/店舗の共有URL" --all
 
 - 本文の「もっと見る」を展開し、口コミ一覧を自動スクロール
 - 口コミIDで重複を除外し、画面の総件数と保存件数を照合
-- 件数が一致したら自動保存して終了
+- 件数が一致したら本文の省略を再確認し、自動保存して終了
 - 総件数に届く前に読み込みが止まった場合は、再スクロールして制限時間まで再試行
 - 無引数で対話メニューを開き、パラメータを番号で選択
 - 収集から保存まで利用者のMacで実行
+- Codex Skillによる話題別の感情分析・個別返信案・改善計画
+- 統計と根拠をたどれるHTML、業務に使う5種類のCSV
 
 ## 必要なもの
 
@@ -22,7 +24,7 @@ google-maps-reviews "https://maps.app.goo.gl/店舗の共有URL" --all
 | ブラウザー | Google Chrome。Chromiumをツールで導入することも可能 |
 | 通信 | GitHub、Pythonパッケージの配布先、Googleマップへの接続 |
 
-CLIの利用にNode.js、Vercel、GitHubアカウント、APIキーは不要です。
+口コミの収集にNode.js、Vercel、GitHubアカウント、APIキーは不要です。AI分析にはCodexアプリまたはログイン済みのCodex CLIを使います。
 
 PythonやChromeがない場合は、Homebrewを導入済みのMacで次を実行できます。
 
@@ -54,6 +56,30 @@ export PATH="$HOME/.local/bin:$PATH"
 次回のターミナルでも使うには、上の行を `~/.zshrc` に追加します。セットアップはシェル設定を自動で書き換えません。PATHを設定する前でも `~/.local/bin/google-maps-reviews` で実行できます。
 
 Chromeの代わりにChromiumを準備する場合は、セットアップの末尾に `--browser chromium` を付けます。その後の収集にも `--browser chromium` を付けるか、対話メニューでChromiumを選択してください。
+
+## Skillで分析レポートを作る
+
+一度、SkillをCodexへ導入します。
+
+```bash
+google-maps-reviews skill install
+```
+
+Codexの新しい会話でURLを渡します。
+
+```text
+$google-review-report https://maps.app.goo.gl/店舗の共有URL
+```
+
+ログイン済みのCodex CLIがある場合、ターミナルでも1コマンドで実行できます。既定の推論レベルは `xhigh` です。
+
+```bash
+google-maps-reviews report "https://maps.app.goo.gl/店舗の共有URL"
+```
+
+収集した口コミを分類し、話題別の感情、顧客体験、原因仮説、優先順位付き改善案、個別返信案を含むHTMLと5種類の業務用CSVをデスクトップに保存します。HTMLはオフラインで開けます。本文ありの全件を分析し、評価だけの口コミも星の統計に含めます。
+
+分析はCodexの利用枠を消費し、口コミ本文をCodexのモデルへ送信します。返信は投稿前確認が必要な下書きです。導入要件、再開方法、事業情報の渡し方、分析の根拠は [レポートの使い方](REPORTING.md) を参照してください。
 
 ## 使い方
 
@@ -93,6 +119,8 @@ Googleマップ口コミ収集
   2. 設定を変更して保存
   3. ブラウザーをセットアップ
   4. 終了
+  5. 口コミ分析レポートを生成
+  6. Codexの分析Skillを導入
 ```
 
 URL、収集範囲、最大件数、制限時間、待機時間、保存先、ブラウザー、手動操作の有無を選べます。Enterで表示中の値を使います。対話で保存した設定は次回のメニューに引き継がれます。
@@ -154,6 +182,8 @@ Excelの「取得情報」シートまたはJSONの `metadata` で、次を確�
 
 `--all` は全件取得を試みる指定です。Google側の表示制限、確認画面、画面変更、通信状況によって取得できない場合があります。総件数が不明・不一致の場合は取得分を保存して全件未確認とします。件数の一致と本文の完全性は別に確認します。投稿日は画面表記のままで、正確な日付を推定しません。本文にはGoogleの翻訳が含まれる場合があります。
 
+件数が揃っても本文に「もっと見る」が残る場合は、制限時間内で最大3回再展開します。クリックを試しただけで展開済みと扱いません。省略が残った場合はその件数を表示・保存し、分析レポートでも暫定の解釈として明記します。
+
 画面の総件数が判明している場合、読み込み済み一覧の末尾に達しただけでは終了しません。未取得の口コミがあれば追加読み込みを再試行し、件数の一致または制限時間で終了します。件数が足りないまま時間切れになった場合は、取得分を保存して終了コード2を返します。通信が遅い店舗では `--timeout 1200` で待機時間を延ばせます。
 
 | 終了コード | 意味 |
@@ -183,13 +213,13 @@ google-maps-reviews setup --browser chrome
 
 セットアップと同じ1コマンドを再実行すると最新のmainへ更新できます。設定と出力ファイルは保持します。既存のpipx版も所有情報を確認して更新します。別ツールのコマンドは上書きしません。
 
-バージョンを固定する場合は、セットアップに `--ref v0.3.1` を付けます。
+バージョンを固定する場合は、セットアップに `--ref v0.4.0` を付けます。
 
 ### pipxから導入する場合
 
 ```bash
 brew install pipx
-pipx install 'git+https://github.com/atsuki-sakai/google-maps-reviews.git@v0.3.0'
+pipx install 'git+https://github.com/atsuki-sakai/google-maps-reviews.git@v0.4.0'
 pipx ensurepath
 google-maps-reviews setup --browser chrome
 ```

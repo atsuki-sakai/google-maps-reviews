@@ -55,6 +55,65 @@ class InstalledCliTest(unittest.TestCase):
         self.assertIn("data-review-id", source)
         self.assertIn("displayed_total", source)
 
+    def test_complete_text_outweighs_a_longer_collapsed_view(self):
+        rows = {}
+        base = {"review_id": "same", "author": "架空の投稿者", "rating": 5}
+        collapsed = dict(base, text="料理が良い…もっと見る・表示上の追加ラベル", text_may_be_truncated=True)
+        complete = dict(base, text="料理が良い", text_may_be_truncated=False)
+        cli.merge_reviews(rows, [collapsed], "架空店舗", "")
+        cli.merge_reviews(rows, [complete], "架空店舗", "")
+        self.assertEqual(rows["same"]["text"], complete["text"])
+        self.assertFalse(rows["same"]["text_may_be_truncated"])
+        cli.merge_reviews(rows, [collapsed], "架空店舗", "")
+        self.assertEqual(rows["same"]["text"], complete["text"])
+        cli.merge_reviews(rows, [dict(base, text="", text_may_be_truncated=False)], "架空店舗", "")
+        self.assertEqual(rows["same"]["text"], complete["text"])
+
+    def test_failed_text_expansion_is_not_cached_and_uses_stable_id(self):
+        page = MagicMock()
+        cards, card = MagicMock(), MagicMock()
+        candidates = [{"id": "stable-id", "selector": "[data-review-id=stable-id]"}]
+        cards.evaluate_all.return_value = candidates
+        page.locator.side_effect = lambda selector: cards if selector == cli.REVIEW_CARD_SELECTOR else card
+        buttons = card.get_by_role.return_value
+        buttons.count.return_value = 1
+        button = buttons.nth.return_value
+        button.is_visible.return_value = True
+        button.click.side_effect = [RuntimeError("transient failure"), None]
+        processed = set()
+        cli.expand_text(page, processed)
+        cli.expand_text(page, processed)
+        self.assertEqual(button.click.call_count, 2)
+        self.assertEqual(processed, set())
+        cards.nth.assert_not_called()
+        page.locator.assert_any_call(cli.REVIEW_CARD_SELECTOR + "[data-review-id=stable-id]")
+
+    def test_expansion_stops_before_another_card_when_deadline_expires(self):
+        page = MagicMock()
+        page.locator.return_value.evaluate_all.return_value = [{"id": "pending", "selector": "[data-review-id=pending]"}]
+        with patch.object(cli.time, "monotonic", return_value=11):
+            cli.expand_text(page, set(), deadline=10)
+        page.locator.assert_called_once_with(cli.REVIEW_CARD_SELECTOR)
+
+    def test_empty_review_view_after_tab_switch_reloads_once(self):
+        page = MagicMock()
+        page.url = "https://www.google.com/maps/place/Test/data=!9m1!1b1"
+        sort = MagicMock()
+        sort.is_visible.return_value = True
+        candidate = MagicMock()
+        candidate.get_attribute.return_value = "クチコミ"
+        candidate.inner_text.return_value = "クチコミ"
+        tabs = MagicMock()
+        tabs.count.return_value = 1
+        tabs.nth.return_value = candidate
+        page.get_by_role.side_effect = lambda role, **_kwargs: MagicMock(first=sort) if role == "button" else tabs
+        cards = page.locator.return_value
+        cards.count.return_value = 0
+        cards.first.wait_for.side_effect = [RuntimeError("SPA did not load reviews"), None]
+        cli.prepare_reviews(page, False)
+        page.reload.assert_called_once_with(wait_until="domcontentloaded", timeout=15000)
+        self.assertEqual(cards.first.wait_for.call_count, 2)
+
     def test_command_runs_from_another_directory_and_exports(self):
         with tempfile.TemporaryDirectory() as folder:
             result = subprocess.run(

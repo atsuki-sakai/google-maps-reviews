@@ -43,7 +43,9 @@ export function mergeReviews(existing: Map<string, Review>, rows: Review[]) {
     if (!row.review_id || !row.author || row.rating === null) continue;
     const old = existing.get(row.review_id);
     const next = { ...row };
-    if (old && old.text.length > next.text.length) {
+    // Complete text outranks length; collapsed views can include extra labels.
+    if (old?.text && (!next.text || (!old.text_may_be_truncated && next.text_may_be_truncated)
+      || (old.text_may_be_truncated === next.text_may_be_truncated && old.text.length > next.text.length))) {
       next.text = old.text;
       next.text_may_be_truncated = old.text_may_be_truncated;
     }
