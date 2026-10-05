@@ -6,27 +6,29 @@
   const cards = Array.from(document.querySelectorAll('[data-review-id]'))
     .filter(el => rendered(el) && !el.parentElement?.closest('[data-review-id]'));
   const rows = cards.map(card => {
-    const rating = first(card, '[role="img"][aria-label*="星"], [role="img"][aria-label*="star"], .kvMYJc');
-    const label = rating?.getAttribute('aria-label') || '';
+    const rating = first(card, '[role="img"][aria-label*="星"], [role="img"][aria-label*="star"], .kvMYJc, .fzvQIb');
+    const label = rating?.getAttribute('aria-label') || text(rating);
     const number = label.match(/([1-5](?:[.,]\d+)?)\s*(?:つ星|星|stars?)/i)
-      || label.match(/(?:星|rated)\s*([1-5](?:[.,]\d+)?)/i);
+      || label.match(/(?:星|rated)\s*([1-5](?:[.,]\d+)?)/i)
+      || label.match(/^([1-5](?:[.,]\d+)?)\s*\/\s*5$/);
     const body = first(card, '.MyEned .wiI7pd, .MyEned, [data-review-text]');
     const owner = first(card, '.CDe7pd, [data-owner-response]');
     const response = owner ? first(owner, '.wiI7pd, [data-response-text]') : null;
     const links = Array.from(card.querySelectorAll('a[href]')).filter(rendered);
     const reviewLink = links.find(a => /(?:reviewid=|\/reviews\/)/i.test(a.href));
     const authorLink = links.find(a => /\/contrib\//.test(a.href));
+    const authorButton = first(card, 'button[data-href*="/contrib/"]');
     const author = first(card, '.d4r55, [data-review-author]');
     return {
       review_id: card.getAttribute('data-review-id') || '',
       author: text(author),
       rating: number ? Number(number[1].replace(',', '.')) : null,
       rating_label: label,
-      date_text: text(first(card, '.rsqaWe, [data-review-date]')),
+      date_text: text(first(card, '.rsqaWe, .xRkPPb, [data-review-date]')),
       text: text(body),
       owner_reply: text(response) || text(owner),
       review_url: reviewLink?.href || '',
-      author_url: authorLink?.href || '',
+      author_url: authorLink?.href || authorButton?.getAttribute('data-href') || '',
       text_may_be_truncated: Array.from(card.querySelectorAll('button')).some(b =>
         rendered(b) && /^(もっと見る|全文を表示|More|See more|Read more)$/i.test(text(b))),
       raw_visible_text: text(card),

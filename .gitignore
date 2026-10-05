@@ -13,3 +13,12 @@ dist/
 *.json
 *.png
 収集エラー_*.txt
+
+node_modules/
+.next/
+.vercel/
+*.tsbuildinfo
+!web/package.json
+!web/package-lock.json
+!web/tsconfig.json
+!web/components.json

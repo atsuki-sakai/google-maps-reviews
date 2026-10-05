@@ -320,6 +320,8 @@ def main(argv=None) -> int:
                             metadata.setdefault("displayed_total_start", data["displayed_total"])
                             metadata["displayed_total_end"] = data["displayed_total"]
                         added = merge_reviews(reviews, data["reviews"], place, data["source_url"])
+                        if data["reviews"] and not reviews:
+                            raise RuntimeError("口コミは表示されていますが、投稿者または評価を読み取れません。ツールを更新してください。")
                         print(f"取得済み: {min(len(reviews), limit)}件 / 画面の総件数: {metadata.get('displayed_total_end', '不明')}", flush=True)
                         if len(reviews) >= limit:
                             metadata["stop_reason"] = "指定件数に到達"

@@ -109,7 +109,44 @@ Chromeがない場合は、開発用環境でChromiumを準備して実行でき
 .venv/bin/google-maps-reviews --browser chromium --all --manual --timeout 1200
 ```
 
-GitHub ActionsではPython 3.10・3.12・3.14で配布用wheelをビルド・インストールし、抽出リソースの同梱、コマンド起動、サンプル出力、重複排除と総件数の照合をテストします。Googleへのログインや実店舗の収集はCIの対象外です。生成した口コミファイル、仮想環境、ブラウザープロファイルはGit管理の対象に含めません。
+GitHub Actionsは使用しません。ローカルのPythonテストで抽出リソースの同梱、コマンド起動、サンプル出力、重複排除と総件数の照合を確認できます。生成した口コミファイル、仮想環境、ブラウザープロファイルはGit管理の対象に含めません。
+
+
+## Web画面（Next.js + shadcn/ui）
+
+`web/` にURL入力・収集状況・口コミ一覧・CSVダウンロード画面を同梱しています。
+
+```bash
+cd web
+npm ci
+npm run dev
+```
+
+ブラウザーで `http://localhost:3000` を開き、Googleマップの店舗URLを貼り付けて「口コミを収集する」を押します。CSVには日本語用BOMを付け、改行と引用符を保持します。
+
+Web版はVercel上のChromiumで表示要素を読み取ります。Googleが未ログインのブラウザーで口コミを非表示にする場合、結果を取得できません。この制限は未ログインのitachiyaへの実行で確認済みです。失敗時は成功件数やダミー口コミを表示せず、具体的な理由を画面に表示します。
+
+既存のログイン済み収集用ブラウザーを利用する場合は、サーバー側の環境変数 `BROWSER_CDP_URL` にそのブラウザーのCDP接続先を設定します。接続先はGitに登録せず、公開用の `NEXT_PUBLIC_` 変数には設定しません。収集完了時に接続を閉じるため、収集専用のセッションを利用してください。クラウドブラウザーの実接続は未確認です。
+
+サーバーの実行時間内に取得できた分をCSVに保存します。画面総件数と重複なし取得件数が一致した場合のみ全件確認済みにします。途中停止や件数不一致では部分取得として表示します。
+
+### Vercelによる自動更新
+
+GitHubリポジトリ `atsuki-sakai/google-maps-reviews` をVercelのGit Integrationで接続し、Root Directoryを `web`、FrameworkをNext.js、Production Branchを `main` に設定します。`main` へのpushでVercelが自動ビルドし、成功したデプロイを本番URLに反映します。GitHub Actionsのワークフローはありません。
+
+Build Commandは `npm run lint && npm test && npm run build`。Vercel上のブラウザー起動とGoogleの表示制限は、静的ビルドの成功とは別に実際の収集で確認が必要です。
+
+```bash
+# 静的チェック・純粋関数のテスト・本番ビルド
+npm run lint
+npm test
+npm run build
+
+# MacのChromeで通常形式・宿泊施設形式を確認（架空のHTML）
+npm run test:browser
+```
+
+Python CLIとWeb版は同じ `extract_reviews.js` を利用します。変更時は `npm run sync` でWeb用の抽出ソースを更新します（dev/buildの前にも自動実行）。
 
 ## 実店舗の確認状況
 
@@ -118,3 +155,5 @@ GitHub ActionsではPython 3.10・3.12・3.14で配布用wheelをビルド・イ
 この確認にはログイン済みのCodex内ブラウザーと同梱の抽出・保存処理を使用しています。専用Chromeでのコマンド通し実行による全件収集は、まだ未確認です。Google側の表示変更、ログイン、確認画面、通信状況で停止する場合があります。店舗ごとに取得情報で件数を確認してください。
 
 実装で参照した公式ドキュメント：[Pythonのパッケージ設定](https://packaging.python.org/en/latest/guides/writing-pyproject-toml/)、[GitHub ActionsでのPythonテスト](https://docs.github.com/en/actions/tutorials/build-and-test-code/python)、[Playwrightの要素操作](https://playwright.dev/python/docs/api/class-locator)。
+
+宿泊施設の「5/5」形式にも対応しています。itachiyaの実画面では表示総件数6件に対し、7件の口コミカードを読み取れました。この不一致は全件確認済みとしません。
