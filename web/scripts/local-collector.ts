@@ -92,7 +92,16 @@ export function createCollectorServer({ collect = collectReviews, ready = async 
     };
     try { await collect(url, emit, abort.signal); }
     catch (error) {
-      if (!abort.signal.aborted) emit({ type: 'error', message: error instanceof PublicCollectionError ? error.message : safeError });
+      if (!abort.signal.aborted) {
+        if (error instanceof Error && !(error instanceof PublicCollectionError)) {
+          // Record operation codes only; URLs, browser credentials and raw errors stay private.
+          console.error(JSON.stringify({ kind: error.name,
+            operation: error.message.match(/^[a-zA-Z.]+(?=:)/)?.[0],
+            network: error.message.match(/net::ERR_[A-Z_]+/)?.[0],
+            timeout: error.message.includes('Timeout'), closed: error.message.includes('closed') }));
+        }
+        emit({ type: 'error', message: error instanceof PublicCollectionError ? error.message : safeError });
+      }
     } finally {
       clearTimeout(timeout);
       response.off('close', cancel);

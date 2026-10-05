@@ -12,7 +12,7 @@ import { Progress } from '@/components/ui/progress';
 import { Separator } from '@/components/ui/separator';
 import { Table, TableHeader, TableHead, TableBody, TableRow, TableCell, TableCaption } from '@/components/ui/table';
 import { toCsv, validateMapsUrl, type Collection, type CollectionEvent } from '@/lib/reviews';
-import { checkLocalCollector, collectionResponseError, needsGoogleLogin, requestCollection, type CollectionSource } from '@/lib/collection-transport';
+import { checkLocalCollector, collectionResponseError, LocalCollectorConnectionError, needsGoogleLogin, requestCollection, type CollectionSource } from '@/lib/collection-transport';
 
 export function Collector() {
   const [url, setUrl] = useState('');
@@ -33,15 +33,18 @@ export function Collector() {
     const controller = new AbortController(); connectionCheck.current = controller;
     setShowSetup(true); setLocalState('checking'); setSetupMessage('ブラウザーに接続の確認が表示されたら、「許可」を選んでください。最大30秒待ちます。');
     try {
-      const health = await checkLocalCollector(controller.signal, { timeoutMs: 30000 });
+      const health = await checkLocalCollector(controller.signal, { timeoutMs: 30000, throwOnFailure: true });
       if (controller.signal.aborted || connectionCheck.current !== controller) return;
       setLocalState(health ? health.busy ? 'busy' : 'ready' : 'unavailable');
       setSetupMessage(health
         ? health.busy ? 'このMacで別の口コミを収集しています。終わってから再度お試しください。'
-          : '接続できました。専用ChromeでGoogleマップを確認し、「口コミを収集する」を押してください。'
+          : '接続できました。専用ChromeでGoogleマップを確認し、「このMacで収集する」を押してください。'
         : 'まだ接続できません。収集サービスの起動と、ブラウザーの接続許可を確認してください。');
-    } catch {
-      if (!controller.signal.aborted) { setLocalState('unavailable'); setSetupMessage('接続を確認できませんでした。再度お試しください。'); }
+    } catch (e) {
+      if (!controller.signal.aborted) {
+        setLocalState('unavailable');
+        setSetupMessage(e instanceof LocalCollectorConnectionError ? e.message : '接続を確認できませんでした。再度お試しください。');
+      }
     } finally { if (connectionCheck.current === controller) connectionCheck.current = null; }
   }
 
@@ -52,18 +55,27 @@ export function Collector() {
 
   async function start(event: React.FormEvent) {
     event.preventDefault();
+    await collect('local');
+  }
+
+  async function collect(selectedSource: CollectionSource) {
     if (busy || localState === 'checking' || request.current || connectionCheck.current) return;
     let target: string;
     try { target = validateMapsUrl(url); } catch (e) { setError((e as Error).message); return; }
-    setError(''); setData(null); setBusy(true); setShowSetup(false); setSetupMessage(''); setSource(null);
-    setLocalState('checking'); setMessage('収集の準備をしています。');
+    setError(''); setData(null); setBusy(true); setShowSetup(false); setSetupMessage(''); setSource(selectedSource);
+    setMessage('収集の準備をしています。');
     const controller = new AbortController(); request.current = controller;
     let completed = false;
     try {
-      const health = await checkLocalCollector(controller.signal);
-      setLocalState(health ? health.busy ? 'busy' : 'ready' : 'unavailable');
-      if (health?.busy) throw new Error('このMacで別の口コミを収集しています。終わってから再度お試しください。');
-      const selectedSource = health ? 'local' : 'cloud'; setSource(selectedSource);
+      if (selectedSource === 'local') {
+        setShowSetup(true); setLocalState('checking');
+        setSetupMessage('ブラウザーに接続の確認が表示されたら、「許可」を選んでください。最大30秒待ちます。');
+        const health = await checkLocalCollector(controller.signal, { timeoutMs: 30000, throwOnFailure: true });
+        setLocalState(health ? health.busy ? 'busy' : 'ready' : 'unavailable');
+        if (!health) throw new LocalCollectorConnectionError('unreachable', 'このMacに接続できません。「接続を再確認」から接続を確認してください。');
+        if (health.busy) throw new Error('このMacで別の口コミを収集しています。終わってから再度お試しください。');
+        setShowSetup(false); setSetupMessage('');
+      }
       setMessage(selectedSource === 'local' ? 'このMacの専用Chromeで収集を開始しています。' : '口コミの収集を開始しています。');
       const response = await requestCollection(target, selectedSource, controller.signal);
       if (!response.ok) throw new Error(await collectionResponseError(response));
@@ -87,12 +99,15 @@ export function Collector() {
       }
       if (!completed) throw new Error('通信が途中で切れました。取得済みの口コミはCSVに保存できます。');
     } catch (e) {
-      if (controller.signal.aborted) { setLocalState('unknown'); setMessage('収集を中止しました。取得済みの口コミを保存できます。'); setData(old => old ? { ...old, verified: false } : null); }
+      if (controller.signal.aborted) { if (selectedSource === 'local') { setLocalState('unknown'); setSetupMessage('収集を中止しました。「接続を再確認」からMacへの接続を確認できます。'); } setMessage('収集を中止しました。取得済みの口コミを保存できます。'); setData(old => old ? { ...old, verified: false } : null); }
       else {
         const errorMessage = e instanceof TypeError || e instanceof SyntaxError
           ? '収集結果を受信できませんでした。時間をおいて再度お試しください。'
           : e instanceof Error ? e.message : '通信に失敗しました。再度お試しください。';
-        setError(errorMessage); setShowSetup(needsGoogleLogin(errorMessage));
+        setError(errorMessage);
+        if (e instanceof LocalCollectorConnectionError) {
+          setLocalState('unavailable'); setSetupMessage(errorMessage); setShowSetup(true);
+        } else setShowSetup(needsGoogleLogin(errorMessage));
       }
     } finally { setBusy(false); request.current = null; }
   }
@@ -126,23 +141,25 @@ export function Collector() {
                 {error && <FieldError>{error}</FieldError>}
               </Field>
               <div className="form-actions">
-                <Button type="submit" size="lg" disabled={busy || localState === 'checking' || !url.trim()}><LinkIcon data-icon="inline-start" />{busy ? '口コミを収集中…' : '口コミを収集する'}</Button>
+                <Button type="submit" size="lg" disabled={busy || localState === 'checking' || !url.trim()}><Monitor data-icon="inline-start" />{busy ? '口コミを収集中…' : 'このMacで収集する'}</Button>
+                <Button type="button" variant="ghost" size="sm" disabled={busy || localState === 'checking' || !url.trim()} onClick={() => collect('cloud')}><LinkIcon data-icon="inline-start" />オンラインで収集を試す</Button>
                 {busy && <Button type="button" variant="outline" onClick={() => request.current?.abort()}><Square data-icon="inline-start" />中止</Button>}
               </div>
             </FieldGroup>
           </form>
-          <p className="privacy-note" role="status" aria-live="polite">{localState === 'checking' ? 'このMacの接続を確認しています。' : localState === 'ready' ? 'このMacの専用Chromeで収集できます。' : '収集結果は、この画面からCSVとして保存できます。'}</p>
+          <p className="privacy-note" role="status" aria-live="polite">{localState === 'checking' ? 'このMacの接続を確認しています。' : localState === 'ready' ? 'このMacの収集サービスと接続できました。' : localState === 'unavailable' ? 'このMacと接続できていません。下の案内に沿って接続を確認してください。' : localState === 'busy' ? 'このMacで別の口コミを収集しています。' : 'このMacの専用Chromeで収集し、CSVとして保存します。初回は「このMacと接続」から準備してください。'}</p>
           <Button type="button" variant="ghost" size="sm" className="mt-2" disabled={busy || localState === 'checking'} onClick={recheckLocal}><Monitor data-icon="inline-start" />このMacと接続</Button>
           {showSetup && <Alert className="mt-5">
             <Monitor />
             <AlertTitle>専用ChromeでGoogleにログインして収集</AlertTitle>
             <AlertDescription className="flex flex-col gap-3">
-              <p>このMacの専用Chromeを使うと、ログインした状態で口コミを収集できます。</p>
+              <p>収集サービスと接続したあと、専用Chromeに表示されたGoogleマップを確認してください。ログインやGoogleの確認が必要な場合は、そのChromeで操作します。</p>
               <ol className="flex list-decimal flex-col gap-2 pl-5">
                 <li><code>start-web-collector.command</code> を開き、このMacの収集サービスを起動します。</li>
                 <li>開いた専用ChromeでGoogleマップを確認し、必要に応じてGoogleにログインします。</li>
                 <li>「接続を再確認」を押し、この画面のブラウザーでローカルネットワーク接続を「許可」にします。</li>
               </ol>
+              <p>以前に接続を拒否した場合は、Chromeのこのサイトの設定でローカルネットワークへのアクセスを許可し、このページを再読み込みしてください。</p>
               <div className="flex flex-wrap items-center gap-3">
                 <Button type="button" variant="outline" size="sm" disabled={busy || localState === 'checking'} onClick={recheckLocal}><RotateCw data-icon="inline-start" />{localState === 'checking' ? '接続を確認中…' : '接続を再確認'}</Button>
                 {!busy && localState === 'checking' && <Button type="button" variant="ghost" size="sm" onClick={cancelConnectionCheck}><Square data-icon="inline-start" />接続確認を中止</Button>}
