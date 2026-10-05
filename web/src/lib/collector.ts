@@ -107,6 +107,10 @@ export async function collectReviews(url: string, emit: (event: CollectionEvent)
       result = { place: data.place_name, sourceUrl: data.source_url, displayedTotal: data.displayed_total,
         reviews: [...rows.values()], verified: false, reason: '' };
       emit({ type: 'progress', data: result });
+      if (isFullCoverage(result.reviews, result.displayedTotal)) {
+        result.reason = '画面の総件数と重複なしの保存件数が一致したため終了しました。';
+        break;
+      }
       const state = await page.locator(cardsSelector).first().evaluate(card => {
         for (let el = card.parentElement; el; el = el.parentElement) {
           const rect = el.getBoundingClientRect();

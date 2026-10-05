@@ -38,6 +38,8 @@ function mockCollectionPage(t: TestContext, options: {
   entries?: { role: 'tab' | 'button'; label: string; availableAt?: number; visible?: boolean }[];
   overviewCount?: number;
   reviews?: Review[];
+  displayedTotal?: number | null;
+  atEnd?: boolean;
 }) {
   let now = 0;
   let opened = false;
@@ -56,7 +58,7 @@ function mockCollectionPage(t: TestContext, options: {
     async count() { return cardCount(); },
     first: () => ({
       async waitFor() { if (!cardCount()) throw new Error('DUMMY_REVIEW_SECRET'); },
-      async evaluate() { return { total: 100, atEnd: true, x: 10, y: 10 }; },
+      async evaluate() { return { total: 100, atEnd: options.atEnd ?? true, x: 10, y: 10 }; },
     }),
     nth: (index: number) => ({
       async getAttribute() { return reviews[index % reviews.length].review_id; },
@@ -89,7 +91,7 @@ function mockCollectionPage(t: TestContext, options: {
     },
     locator: (selector: string) => selector === 'body'
       ? { async innerText() { return options.body || ''; } } : cards,
-    async evaluate() { return { place_name: 'テスト店舗', source_url: 'https://www.google.com/maps/test', displayed_total: reviews.length, reviews }; },
+    async evaluate() { return { place_name: 'テスト店舗', source_url: 'https://www.google.com/maps/test', displayed_total: options.displayedTotal === undefined ? reviews.length : options.displayedTotal, reviews }; },
     mouse: { async move() {}, async wheel() {} },
     async waitForTimeout(ms: number) { now += ms; },
     async close() { closed.push('collection-page'); },
@@ -104,6 +106,42 @@ function mockCollectionPage(t: TestContext, options: {
   t.mock.method(chromium, 'connectOverCDP', async () => browser);
   return { page, clicked, closed, elapsed: () => now };
 }
+
+test('総件数に一致したら末尾に未到達でも追加スクロールせず完了する', async (t) => {
+  const fixture = mockCollectionPage(t, {
+    entries: [{ role: 'tab', label: '口コミ' }], atEnd: false,
+  });
+  const wheel = t.mock.method(fixture.page.mouse, 'wheel', async () => { throw new Error('完了後にスクロールしました'); });
+  const events: CollectionEvent[] = [];
+  await collectReviews('https://www.google.com/maps/test', event => events.push(event), new AbortController().signal);
+  const done = events.at(-1);
+  assert.equal(done?.type, 'done');
+  if (done?.type !== 'done') assert.fail('完了イベントがありません');
+  assert.equal(done.data.verified, true);
+  assert.match(done.data.reason, /保存件数が一致/);
+  assert.equal(wheel.mock.callCount(), 0);
+  assert.equal(fixture.elapsed(), 0);
+  assert.deepEqual(fixture.closed, ['collection-page', 'disconnect']);
+});
+
+test('総件数が不明または未達の場合は追加読み込みを続ける', async (t) => {
+  for (const displayedTotal of [null, 2]) {
+    await t.test(String(displayedTotal), async (fixtureTest) => {
+      const fixture = mockCollectionPage(fixtureTest, {
+        entries: [{ role: 'tab', label: '口コミ' }], displayedTotal,
+      });
+      const wheel = fixtureTest.mock.method(fixture.page.mouse, 'wheel', async () => {});
+      const events: CollectionEvent[] = [];
+      await collectReviews('https://www.google.com/maps/test', event => events.push(event), new AbortController().signal);
+      const done = events.at(-1);
+      assert.equal(done?.type, 'done');
+      if (done?.type !== 'done') assert.fail('完了イベントがありません');
+      assert.equal(done.data.verified, false);
+      assert.match(done.data.reason, /末尾/);
+      assert.ok(wheel.mock.callCount() > 0);
+    });
+  }
+});
 
 test('CDPの接続秘密とPlaywrightの生例外をSSEに公開しない', async (t) => {
   const paths: string[] = [];

@@ -164,6 +164,39 @@ class LocalServiceCliTest(unittest.TestCase):
                 self.assertIn("error", data["metadata"])
                 self.assertEqual(opener.open.call_count, 2)
 
+    def test_unchanged_progress_and_done_counts_are_printed_once(self):
+        events = [{"type": kind, "data": self.payload(count)}
+                  for kind, count in [("progress", 1), ("progress", 1), ("progress", 2), ("done", 2)]]
+        opener = MagicMock()
+        opener.open.side_effect = [io.BytesIO(b'{"ready":true,"version":"1.0.0"}'), self.stream(events)]
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as folder, patch.object(cli, "build_opener", return_value=opener), redirect_stdout(output):
+            self.assertEqual(cli.main(["https://www.google.com/maps/test", "--all", "--output-dir", folder]), 0)
+        self.assertEqual(output.getvalue().count("取得済み: 1件"), 1)
+        self.assertEqual(output.getvalue().count("取得済み: 2件"), 1)
+
+    def test_cli_browser_finishes_at_total_without_scrolling(self):
+        page = MagicMock()
+        page.url = "https://www.google.com/maps/test"
+        payload = self.payload(2)
+        page.evaluate.return_value = {"place_name": payload["place"], "source_url": payload["sourceUrl"],
+                                      "displayed_total": 2, "reviews": payload["reviews"]}
+        context = MagicMock(pages=[page])
+        pw = MagicMock()
+        pw.chromium.launch_persistent_context.return_value = context
+        with tempfile.TemporaryDirectory() as folder, patch.object(cli, "collect_from_local_service", return_value=False), \
+                patch("playwright.sync_api.sync_playwright") as playwright, patch.object(cli, "prepare_reviews"), \
+                patch.object(cli, "blocked", return_value=False), patch.object(cli, "expand_text"), \
+                patch.object(cli, "scroll_reviews") as scrolling, redirect_stdout(io.StringIO()):
+            playwright.return_value.__enter__.return_value = pw
+            self.assertEqual(cli.main([page.url, "--all", "--output-dir", folder]), 0)
+            scrolling.assert_not_called()
+            page.evaluate.assert_called_once()
+            context.close.assert_called_once()
+            metadata = json.loads(next(Path(folder).glob("*.json")).read_text())["metadata"]
+            self.assertTrue(metadata["full_coverage_verified"])
+            self.assertIn("保存件数が一致", metadata["stop_reason"])
+
     def test_busy_service_does_not_start_another_collection(self):
         opener = MagicMock()
         opener.open.return_value = io.BytesIO(b'{"ready":true,"version":"1.0.0","busy":true}')

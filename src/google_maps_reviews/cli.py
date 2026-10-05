@@ -301,6 +301,7 @@ def collect_from_local_service(args, reviews: dict, metadata: dict) -> bool:
         return False
     metadata["collector"] = "このMacの収集サービス"
     started = time.monotonic()
+    last_progress = None
     try:
         if health.get("busy"):
             raise RuntimeError("このMacでは口コミを収集中です。完了後に再実行してください。")
@@ -327,7 +328,10 @@ def collect_from_local_service(args, reviews: dict, metadata: dict) -> bool:
                                 displayed_total_end=data["displayedTotal"])
                 if data["displayedTotal"] is not None:
                     metadata.setdefault("displayed_total_start", data["displayedTotal"])
-                print(f"取得済み: {len(reviews)}件 / 画面の総件数: {data['displayedTotal']}", flush=True)
+                progress = (len(reviews), data["displayedTotal"])
+                if progress != last_progress:
+                    print(f"取得済み: {progress[0]}件 / 画面の総件数: {progress[1]}", flush=True)
+                    last_progress = progress
                 if event["type"] == "done":
                     metadata["stop_reason"] = data["reason"]
                     metadata["service_verified"] = data["verified"] is True
@@ -399,6 +403,9 @@ def run_collection(args) -> int:
                             break
                         if args.visible_only:
                             metadata["stop_reason"] = "現在読み込まれた口コミのみ保存"
+                            break
+                        if full_coverage_verified(list(reviews.values()), metadata.get("displayed_total_end")):
+                            metadata["stop_reason"] = "画面の総件数と重複なしの保存件数が一致したため終了しました。"
                             break
                         if time.monotonic() - started >= args.timeout:
                             metadata["stop_reason"] = "制限時間に到達"
