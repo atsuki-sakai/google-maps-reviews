@@ -6,6 +6,8 @@ import { isFullCoverage, mergeReviews, type Collection, type CollectionEvent, ty
 const cardsSelector = '[data-review-id]:not([data-review-id] [data-review-id])';
 type Extracted = { place_name: string; source_url: string; displayed_total: number | null; reviews: Review[] };
 
+export class PublicCollectionError extends Error {}
+
 export async function collectReviews(url: string, emit: (event: CollectionEvent) => void, signal: AbortSignal) {
   let browser: Browser | undefined;
   const rows = new Map<string, Review>();
@@ -15,7 +17,7 @@ export async function collectReviews(url: string, emit: (event: CollectionEvent)
   const abort = () => { cancelled = true; void browser?.close(); };
   signal.addEventListener('abort', abort, { once: true });
   try {
-    if (cancelled) throw new Error('収集を中止しました。');
+    if (cancelled) throw new PublicCollectionError('収集を中止しました。');
     emit({ type: 'status', message: 'Googleマップの店舗ページを開いています。' });
     if (process.env.BROWSER_CDP_URL) {
       browser = await playwright.connectOverCDP(process.env.BROWSER_CDP_URL, { timeout: 25000 });
@@ -24,6 +26,7 @@ export async function collectReviews(url: string, emit: (event: CollectionEvent)
     } else {
       browser = await playwright.launch({ channel: 'chrome', headless: true });
     }
+    if (cancelled) return;
     const context = (process.env.BROWSER_CDP_URL && browser.contexts()[0])
       || await browser.newContext({ locale: 'ja-JP', viewport: { width: 1280, height: 900 } });
     const page = await context.newPage();
@@ -38,8 +41,8 @@ export async function collectReviews(url: string, emit: (event: CollectionEvent)
     catch {
       const body = await page.locator('body').innerText();
       if (/captcha|通常と異なるトラフィック|unusual traffic|表示が制限|ログイン/i.test(body))
-        throw new Error('Googleがこの収集用ブラウザーでの口コミ表示を制限しています。ログイン済みの収集環境が必要です。MacのCLIではログイン後に収集できます。');
-      throw new Error('口コミ一覧が見つかりません。店舗ページの共有URLを確認してください。');
+        throw new PublicCollectionError('Googleがこの収集用ブラウザーでの口コミ表示を制限しています。ログイン済みの収集環境が必要です。MacのCLIではログイン後に収集できます。');
+      throw new PublicCollectionError('口コミ一覧が見つかりません。店舗ページの共有URLを確認してください。');
     }
     emit({ type: 'status', message: '口コミを読み込み、本文の省略を展開しています。' });
     const expanded = new Set<string>();
@@ -59,7 +62,7 @@ export async function collectReviews(url: string, emit: (event: CollectionEvent)
       }
       const data = await page.evaluate('(' + extractorSource + ')()') as Extracted;
       mergeReviews(rows, data.reviews);
-      if (data.reviews.length && !rows.size) throw new Error('口コミの投稿者または評価を読み取れません。表示形式の対応が必要です。');
+      if (data.reviews.length && !rows.size) throw new PublicCollectionError('口コミの投稿者または評価を読み取れません。表示形式の対応が必要です。');
       result = { place: data.place_name, sourceUrl: data.source_url, displayedTotal: data.displayed_total,
         reviews: [...rows.values()], verified: false, reason: '' };
       emit({ type: 'progress', data: result });
@@ -72,7 +75,7 @@ export async function collectReviews(url: string, emit: (event: CollectionEvent)
         }
         return null;
       });
-      if (!state) throw new Error('口コミ一覧のスクロール領域を確認できません。');
+      if (!state) throw new PublicCollectionError('口コミ一覧のスクロール領域を確認できません。');
       stalled = before === rows.size && state.atEnd ? stalled + 1 : 0;
       if (stalled >= 5) { result.reason = '口コミ一覧の末尾まで読み込みました。'; break; }
       await page.mouse.move(state.x, state.y);
@@ -81,7 +84,7 @@ export async function collectReviews(url: string, emit: (event: CollectionEvent)
     }
     result.reason ||= cancelled ? '収集を中止しました。' : '収集の制限時間に到達しました。取得分を保存できます。';
     result.verified = !cancelled && isFullCoverage(result.reviews, result.displayedTotal);
-    if (!result.reviews.length) throw new Error('口コミを取得できませんでした。');
+    if (!result.reviews.length) throw new PublicCollectionError('口コミを取得できませんでした。');
     emit({ type: 'done', data: result });
   } catch (error) {
     if (cancelled) return;

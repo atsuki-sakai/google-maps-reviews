@@ -132,7 +132,7 @@ Web版はVercel上のChromiumで表示要素を読み取ります。Googleが未
 
 ### Vercelによる自動更新
 
-GitHubリポジトリ `atsuki-sakai/google-maps-reviews` をVercelのGit Integrationで接続し、Root Directoryを `web`、FrameworkをNext.js、Production Branchを `main` に設定します。`main` へのpushでVercelが自動ビルドし、成功したデプロイを本番URLに反映します。GitHub Actionsのワークフローはありません。
+GitHubリポジトリ `atsuki-sakai/google-maps-reviews` は[Vercelプロジェクト](https://vercel.com/atsukisakais-projects/google-maps-reviews)とGit Integrationで接続しています。Root Directoryは `web`、FrameworkはNext.js、Node.jsは22、Production Branchは `main` です。`main` へのpushでVercelが自動ビルドし、成功したデプロイを本番URLに反映します。GitHub Actionsのワークフローはありません。
 
 Build Commandは `npm run lint && npm test && npm run build`。Vercel上のブラウザー起動とGoogleの表示制限は、静的ビルドの成功とは別に実際の収集で確認が必要です。
 
