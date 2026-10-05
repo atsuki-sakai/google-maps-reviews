@@ -4,6 +4,34 @@ Googleマップのブラウザー画面に読み込まれた口コミを収集�
 
 ## インストール
 
+### 1コマンドでセットアップ
+
+Python 3.10以上とGitHub CLI（`gh`）が必要です。このリポジトリは非公開なので、アクセス権のあるGitHubアカウントで `gh auth login` を済ませてください。Google Chromeを使う場合は、Chromeもインストールしておきます。
+
+```bash
+bash -o pipefail -c 'gh api repos/atsuki-sakai/google-maps-reviews/contents/install-cli.py -H "Accept: application/vnd.github.raw+json" | python3 - --browser chrome'
+```
+
+ソースの取得、専用のPython環境の作成、依存パッケージのインストール、Chromeの確認を行います。管理者権限は使いません。Chromeの代わりにChromiumを準備する場合は、末尾を `--browser chromium` にします。
+
+```bash
+google-maps-reviews
+```
+
+コマンドが見つからない場合は `~/.local/bin/google-maps-reviews` で起動できます。今のターミナルにPATHを追加するには `export PATH="$HOME/.local/bin:$PATH"` を実行します。利用者のシェル設定ファイルは自動で変更しません。
+
+既定のインストール先は `~/.local` です。専用環境は `share/google-maps-reviews/venv`、コマンドは `bin/google-maps-reviews`、保存設定は `share/google-maps-reviews/settings.json` に置きます。既存の別ツールやpipx版コマンドを上書きしません。pipx版の更新は下の「更新・削除」を使ってください。
+
+取得済みのリポジトリからセットアップする場合：
+
+```bash
+python3 install-cli.py --source . --browser chrome
+# インストール先を変更する場合
+python3 install-cli.py --source . --browser chrome --prefix "$HOME/Tools/review-port"
+```
+
+### pipxによるインストール
+
 Python 3.10以上、Google Chrome、pipxが必要です。リポジトリは非公開のため、アクセス権のあるGitHubアカウントで取得します。
 
 ```bash
@@ -22,6 +50,39 @@ google-maps-reviews --help
 ```
 
 pipxがないMacでは `brew install pipx` で準備できます。pipxの代わりに `uv tool install .` も使えます。PyPIへの公開は行っていません。
+
+## 対話メニュー
+
+ターミナルで `google-maps-reviews` を実行すると、番号で選べるメニューが開きます。
+
+```text
+Googleマップ口コミ収集
+  1. 口コミを収集
+  2. 設定を変更して保存
+  3. ブラウザーをセットアップ
+  4. 終了
+```
+
+収集時に店舗URL、全件または件数上限、手動操作、表示分のみの収集、スクロール後の待機秒数、制限時間、保存先、ChromeまたはChromiumを選べます。Enterで表示された既定値を使います。設定を保存すると、次回の対話でも同じ値を使えます。`Control+C` や入力終了で対話を終了できます。
+
+```bash
+# メニューを明示して開く
+google-maps-reviews --interactive
+
+# 保存設定の表示・対話で変更・初期化
+google-maps-reviews settings show
+google-maps-reviews settings edit
+google-maps-reviews settings reset
+
+# ブラウザーの準備だけを実行
+google-maps-reviews setup --browser chrome
+google-maps-reviews setup --browser chromium
+
+# 保存設定で非対話実行。明示したオプションを優先
+google-maps-reviews "https://maps.app.goo.gl/店舗の共有URL" --use-settings --all
+```
+
+pipx版などの設定ファイルは `~/.config/google-maps-reviews/settings.json` です。`--config ファイル名` または環境変数 `GOOGLE_MAPS_REVIEWS_CONFIG` で変更できます。パイプやジョブで無引数起動しても入力待ちにはならず、使い方を表示して終了します。既存のURL・オプション指定で実行する場合は従来の既定値を使い、保存設定を使う時だけ `--use-settings` を指定します。
 
 ## 全件取得
 
@@ -79,14 +140,16 @@ Excelの「取得情報」で画面の総件数、保存件数、停止理由、
 
 ## 更新・削除
 
-リポジトリのフォルダーで実行します。
+1コマンドでセットアップした版は、同じセットアップコマンドを再実行すると更新できます。`--prefix` を使った場合は同じ導入先を指定してください。保存設定は専用Python環境とは別のファイルに保持します。
+
+pipx版はリポジトリのフォルダーで実行します。
 
 ```bash
 git pull --ff-only
 pipx reinstall google-maps-reviews
 ```
 
-削除する場合：
+pipx版を削除する場合：
 
 ```bash
 pipx uninstall google-maps-reviews

@@ -182,6 +182,8 @@ def prepare_reviews(page, manual: bool):
                 except Exception:
                     continue
     print("ブラウザーで対象店舗の「口コミ」を開いてください。並び順や絞り込みも画面で選べます。")
+    if not sys.stdin.isatty():
+        raise RuntimeError("口コミ一覧を自動で開けませんでした。ターミナルで--manualを指定して再実行してください。")
     try:
         input("口コミが表示されたら、このターミナルでEnterを押してください: ")
     except EOFError as error:
@@ -256,8 +258,8 @@ def blocked(page) -> bool:
     return bool(re.search(r"unusual traffic|通常と異なるトラフィック|自動化されたクエリ", body, re.I))
 
 
-def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(prog="google-maps-reviews", description="Googleマップの表示された口コミを読み取り、デスクトップにCSV・Excel・JSONを保存します。")
+def build_parser():
+    parser = argparse.ArgumentParser(prog="google-maps-reviews", description="Googleマップの表示された口コミを読み取り、CSV・Excel・JSONに保存します。無引数で対話メニューを開きます。", epilog="準備: google-maps-reviews setup --browser chromium / 設定: google-maps-reviews settings show")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("url", nargs="?", type=maps_url, help="店舗URL。省略時はブラウザーで店舗を選択")
     scope = parser.add_mutually_exclusive_group()
@@ -270,9 +272,18 @@ def main(argv=None) -> int:
     parser.add_argument("--output-dir", type=Path, default=Path.home() / "Desktop" / "GoogleMap口コミ")
     parser.add_argument("--browser", choices=("chrome", "chromium"), default="chrome")
     parser.add_argument("--demo", action="store_true", help="実在の口コミではないサンプルで出力確認")
-    args = parser.parse_args(argv)
-    if args.all and args.visible_only:
-        parser.error("--allと--visible-onlyは同時に指定できません。")
+    parser.add_argument("--interactive", action="store_true", help="対話メニューを開く（ターミナル専用）")
+    parser.add_argument("--use-settings", action="store_true", help="保存設定を使用。明示したオプションを優先")
+    parser.add_argument("--config", type=Path, help="設定ファイルを指定（環境変数GOOGLE_MAPS_REVIEWS_CONFIGも使用可）")
+    return parser
+
+
+def main(argv=None) -> int:
+    from .console import dispatch
+    return dispatch(list(sys.argv[1:] if argv is None else argv), build_parser())
+
+
+def run_collection(args) -> int:
     limit = sys.maxsize if args.all else args.max
     now = datetime.now().astimezone()
     stamp = now.strftime("%Y%m%d_%H%M%S_%f")
@@ -373,7 +384,7 @@ def main(argv=None) -> int:
     if not rows:
         print("口コミを取得できなかったため、口コミファイルは生成していません。", file=sys.stderr)
         if args.browser == "chromium":
-            print("Chromium未導入の場合: .venv/bin/python -m playwright install chromium", file=sys.stderr)
+            print("Chromium未導入の場合: google-maps-reviews setup --browser chromium", file=sys.stderr)
         return 1
     name = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", metadata.get("place_name", "口コミ"))[:60].strip(" .") or "口コミ"
     stem = f"{'サンプル_' if args.demo else ''}{name}_口コミ_{stamp}"
