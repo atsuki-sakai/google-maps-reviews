@@ -5,6 +5,7 @@ import argparse
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -172,6 +173,37 @@ def setup_browser(browser: str, path: Path) -> int:
     return 0
 
 
+def login_browser(browser: str) -> int:
+    """Open the same owned profile used by collection, without exporting data."""
+    from playwright.sync_api import sync_playwright
+    try:
+        with sync_playwright() as pw, cli.collection_browser(pw, browser) as context:
+            page = context.pages[0] if context.pages else context.new_page()
+            page.goto("https://www.google.com/maps?hl=ja", wait_until="domcontentloaded", timeout=45000)
+            print("ツール専用ブラウザーを開きました。普段のChromeとはログイン状態が別です。", flush=True)
+            print("このブラウザーでGoogleにログインしてください。認証情報はブラウザーで入力します。", flush=True)
+            try:
+                input("ログインが完了したらEnterを押してください: ")
+            except EOFError as error:
+                raise RuntimeError("ログイン確認が中断されました。ターミナルで再実行してください。") from error
+            # Login can finish in another tab; inspect a fresh Maps page.
+            page.goto("https://www.google.com/maps?hl=ja", wait_until="domcontentloaded", timeout=45000)
+            account = page.get_by_role("button", name=re.compile(r"Google\s*(アカウント|Account)", re.I)).first
+            try:
+                account.wait_for(state="visible", timeout=15000)
+            except Exception:
+                print("ログイン完了を画面で確認できませんでした。google-maps-reviews login で再確認してください。", file=sys.stderr)
+                return 2
+            if not account.is_visible():
+                print("ログイン完了を画面で確認できませんでした。google-maps-reviews login で再確認してください。", file=sys.stderr)
+                return 2
+            print("専用ブラウザーのログインを確認しました。次回の口コミ収集でも同じプロファイルを使用します。")
+            return 0
+    except Exception as error:
+        print(f"専用ブラウザーのログイン確認を終了しました: {error}", file=sys.stderr)
+        return 1
+
+
 def interactive_menu(args, path: Path, argv: list[str]) -> int:
     current = load_settings(path)
     apply_settings(args, current, argv)
@@ -183,12 +215,15 @@ def interactive_menu(args, path: Path, argv: list[str]) -> int:
     while True:
         action = choose("\nGoogleマップ口コミ収集", {"1": ("口コミを収集", "collect"), "2": ("設定を変更して保存", "settings"),
                                              "3": ("ブラウザーをセットアップ", "setup"), "4": ("終了", "exit"),
-                                             "5": ("CSV分析Skillを導入", "skill")}, "collect")
+                                             "5": ("CSV分析Skillを導入", "skill"), "6": ("専用ブラウザーにログイン", "login")}, "collect")
         if action == "exit":
             return last_code
         if action == "skill":
             from .report_cli import skill_main
             last_code = skill_main(["install"])
+            continue
+        if action == "login":
+            last_code = login_browser(current["browser"])
             continue
         if action == "setup":
             browser = choose("準備するブラウザー", {"1": ("既存Chromeを確認（ダウンロードなし）", "chrome"),
@@ -211,9 +246,15 @@ def dispatch(argv: list[str], parser) -> int:
         if argv and argv[0] in ("report", "skill"):
             from .report_cli import report_main, skill_main
             return (report_main if argv[0] == "report" else skill_main)(argv[1:])
-        if argv and argv[0] in ("setup", "settings"):
+        if argv and argv[0] in ("setup", "settings", "login"):
             command = argv[0]
             subparser = argparse.ArgumentParser(prog=f"google-maps-reviews {command}")
+            if command == "login":
+                subparser.add_argument("--browser", choices=("chrome", "chromium"), default="chrome", help="専用ブラウザー（既定:chrome）")
+                args = subparser.parse_args(argv[1:])
+                if not sys.stdin.isatty():
+                    subparser.error("ログイン操作にはターミナルが必要です。")
+                return login_browser(args.browser)
             subparser.add_argument("--config", type=Path, help="設定ファイル")
             if command == "setup":
                 subparser.add_argument("--browser", choices=("chrome", "chromium"), default="chrome", help="Chrome確認またはChromiumダウンロード（既定:chrome）")

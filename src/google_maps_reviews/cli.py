@@ -327,6 +327,21 @@ def reviews_restricted(page) -> bool:
     return bool(re.search(r"Google\s*マップの表示が制限|Google\s*Maps[^\n]{0,80}(restricted|limited)", body, re.I))
 
 
+def recover_restricted_reviews(page) -> bool:
+    """Let a terminal user restore access without closing the owned browser."""
+    if not sys.stdin.isatty():
+        return False
+    print("Googleマップの表示制限を検知しました。収集を一時停止し、専用ブラウザーを開いたまま待ちます。", flush=True)
+    print("普段のChromeとはログイン状態が別です。この専用ブラウザーでログインし、同じ店舗の全口コミを開いてください。", flush=True)
+    prepare_reviews(page, manual=True)
+    if reviews_restricted(page):
+        # Signing in in another tab does not refresh the existing Maps DOM.
+        # Refresh once after the user finishes, without repeating the prompt.
+        page.reload(wait_until="domcontentloaded", timeout=45000)
+        page.locator(REVIEW_CARD_SELECTOR).first.wait_for(state="visible", timeout=15000)
+    return True
+
+
 def review_scroll_state(page) -> dict:
     return page.locator(REVIEW_CARD_SELECTOR).first.evaluate("""card => {
         for (let el = card.parentElement; el; el = el.parentElement) {
@@ -379,7 +394,7 @@ def blocked(page) -> bool:
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(prog="google-maps-reviews", description="Googleマップの口コミを収集し、CSV・Excel・JSONに保存します。無引数で対話メニューを開きます。", epilog="準備: setup --browser chrome / 設定: settings show / CSV分析Skill導入: skill install（すべてgoogle-maps-reviewsに続けて指定）")
+    parser = argparse.ArgumentParser(prog="google-maps-reviews", description="Googleマップの口コミを収集し、CSV・Excel・JSONに保存します。無引数で対話メニューを開きます。", epilog="準備: setup --browser chrome / 専用ブラウザーにログイン: login / 設定: settings show / CSV分析Skill導入: skill install（すべてgoogle-maps-reviewsに続けて指定）")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("url", nargs="?", type=maps_url, help="店舗URL。省略時はブラウザーで店舗を選択")
     scope = parser.add_mutually_exclusive_group()
@@ -522,11 +537,14 @@ def run_collection(args) -> int:
                     metadata.update(resolved_url=expected_url, collector="CLIの専用ブラウザー")
                     prepare_reviews(page, args.manual or not args.url)
                     metadata.update(source_url=page.url)
+                    ensure_same_place(expected_url, page.url)
+                    expected_url = page.url
                     started = time.monotonic()
                     stagnant = 0
                     expanded_ids = set()
                     final_expansion_passes = 0
                     last_progress = None
+                    recovery_attempted = False
                     while True:
                         if blocked(page):
                             metadata["stop_reason"] = "確認画面のため停止"
@@ -570,7 +588,19 @@ def run_collection(args) -> int:
                             metadata["stop_reason"] = "制限時間に到達"
                             break
                         if reviews_restricted(page):
-                            raise RuntimeError("Googleマップが表示する口コミを制限しています。取得済み分を保存します。--manualで専用Chromeにログインし、同じ店舗の全口コミが表示されることを確認してから再実行してください。")
+                            if not recovery_attempted:
+                                recovery_attempted = True
+                                metadata["manual_recovery_attempted"] = True
+                                paused = time.monotonic()
+                                if recover_restricted_reviews(page):
+                                    # Do not consume the collection timeout during login.
+                                    started += time.monotonic() - paused
+                                    ensure_same_place(expected_url, page.url)
+                                    expanded_ids.clear()
+                                    stagnant = 0
+                                    continue
+                            login = "google-maps-reviews login" + (f" --browser {args.browser}" if args.browser != "chrome" else "")
+                            raise RuntimeError(f"Googleマップの表示制限が残っています。取得済み分を保存します。専用ブラウザーのログインは {login} で確認できます。ログインしてもGoogle側の制限が残る場合は収集できません。")
                         if not data["reviews"]:
                             raise RuntimeError("口コミカードを読み取れません。画面変更または未対応の表示形式です。")
                         if open_full_reviews(page):
@@ -624,7 +654,8 @@ def run_collection(args) -> int:
                 metadata["stop_reason"] = "口コミ一覧の末尾に到達し、画面の総件数との一致を確認"
         elif args.all or period:
             metadata["incomplete"] = True
-            print(f"全件取得は未確認です。保存{len(rows)}件 / 画面{metadata.get('displayed_total_end', '不明')}件。", file=sys.stderr)
+            print(f"一覧の全件読取は未確認です。読取{len(scanned_rows)}件 / 画面{metadata.get('displayed_total_end', '不明')}件。" if period
+                  else f"全件取得は未確認です。保存{len(rows)}件 / 画面{metadata.get('displayed_total_end', '不明')}件。", file=sys.stderr)
         if period:
             metadata["period_selection_verified"] = metadata["full_coverage_verified"] and not metadata["period_uncertain_count"]
             metadata["incomplete"] = not metadata["period_selection_verified"]

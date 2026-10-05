@@ -30,7 +30,7 @@ git diff --check
 ## 構成
 
 - `src/google_maps_reviews/cli.py`: ブラウザー操作、重複排除、件数照合、ファイル出力
-- `src/google_maps_reviews/console.py`: 対話メニュー、設定、ブラウザーのセットアップ
+- `src/google_maps_reviews/console.py`: 対話メニュー、設定、ブラウザーのセットアップ・ログイン確認
 - `src/google_maps_reviews/browser.py`: 専用Chromeの起動、同時実行の防止、終了処理
 - `src/google_maps_reviews/extract_reviews.js`: 表示された口コミカードの抽出
 - `src/google_maps_reviews/dates.py`: 画面日付の範囲推定、期間内・境界・不明の判定

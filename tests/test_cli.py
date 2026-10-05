@@ -248,6 +248,37 @@ class InstalledCliTest(unittest.TestCase):
             self.assertEqual(cli.main(["setup"]), 0)
             self.assertEqual(setup.call_args.args[0], "chrome")
 
+    def test_login_requires_a_terminal_before_opening_browser(self):
+        with patch.object(sys.stdin, "isatty", return_value=False), patch.object(console, "login_browser") as login, redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as result:
+                cli.main(["login"])
+            self.assertEqual(result.exception.code, 2)
+            login.assert_not_called()
+
+    def test_login_defaults_match_direct_collection_browser(self):
+        with patch.object(sys.stdin, "isatty", return_value=True), patch.object(console, "load_settings", side_effect=AssertionError("settings must be opt-in")), patch.object(console, "login_browser", return_value=0) as login:
+            self.assertEqual(cli.main(["login"]), 0)
+            login.assert_called_with("chrome")
+            self.assertEqual(cli.main(["login", "--browser", "chromium"]), 0)
+            login.assert_called_with("chromium")
+
+    def test_login_uses_collection_profile_and_checks_visible_account(self):
+        page = MagicMock()
+        context = MagicMock(pages=[page])
+        with patch("playwright.sync_api.sync_playwright"), patch.object(cli, "collection_browser") as launch, patch("builtins.input", return_value=""), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            launch.return_value.__enter__.return_value = context
+            page.get_by_role.return_value.first.is_visible.return_value = True
+            self.assertEqual(console.login_browser("chrome"), 0)
+            self.assertEqual(launch.call_args.args[1], "chrome")
+            launch.return_value.__exit__.assert_called_once()
+            page.evaluate.assert_not_called()
+            page.get_by_role.return_value.first.is_visible.return_value = False
+            self.assertEqual(console.login_browser("chrome"), 2)
+        with patch("playwright.sync_api.sync_playwright"), patch.object(cli, "collection_browser") as launch, patch("builtins.input", side_effect=EOFError), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            launch.return_value.__enter__.return_value = context
+            self.assertEqual(console.login_browser("chrome"), 1)
+            launch.return_value.__exit__.assert_called_once()
+
 
 class LocalServiceCliTest(unittest.TestCase):
     def setUp(self):

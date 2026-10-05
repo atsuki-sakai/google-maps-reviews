@@ -49,18 +49,26 @@ def date_bounds(text: str, anchor: date) -> tuple[date | None, date | None, str]
         number, unit = (1 if english[1] in ("a", "an") else int(english[1])), english[2]
     else:
         return None, None, "日付不明"
-    # Google does not show a precise timestamp or rounding rule here. Keep a
-    # range around the label; never turn "one month ago" into an exact date.
+    # Google does not publish a timestamp or rounding rule for these labels.
+    # Use an envelope for floor/nearest rounding: n units means between
+    # n - 0.5 and n + 1 units ago, with a day for the local-date boundary.
+    # This is an explicit inference, not an exact Google posting timestamp.
+    # In particular, "1 year ago" must not extend all the way to today.
     try:
         if unit in ("month", "year"):
             step = 12 if unit == "year" else 1
             lower = shift_months(anchor, -(number + 1) * step) - timedelta(days=1)
-            upper = shift_months(anchor, -max(0, number - 1) * step) + timedelta(days=1)
+            center = shift_months(anchor, -number * step)
+            newer = shift_months(anchor, -max(0, number - 1) * step)
+            upper = center + timedelta(days=((newer - center).days + 1) // 2 + 1)
         else:
-            step = {"minute": 0, "hour": 0, "day": 1, "week": 7}[unit]
-            lower = anchor - timedelta(days=(number + 1) * step + 1)
-            upper = anchor - timedelta(days=max(0, number - 1) * step) + timedelta(days=1)
-        return lower, min(anchor, upper), "相対表示からの推定範囲"
+            seconds = {"minute": 60, "hour": 3600, "day": 86400, "week": 604800}[unit]
+            # Round outwards before converting elapsed time to calendar dates.
+            lower_days = ((number + 1) * seconds + 86399) // 86400 + 1
+            upper_days = max(0, (2 * number - 1) * seconds // 172800 - 1)
+            lower = anchor - timedelta(days=lower_days)
+            upper = anchor - timedelta(days=upper_days)
+        return lower, min(anchor, upper), "相対表示からの推定範囲（丸め仮定あり）"
     except (ValueError, OverflowError):
         return None, None, "日付不明"
 
