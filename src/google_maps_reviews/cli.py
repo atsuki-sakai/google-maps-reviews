@@ -13,6 +13,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
+from urllib.request import ProxyHandler, Request, build_opener
 
 from . import __version__
 
@@ -283,6 +284,63 @@ def main(argv=None) -> int:
     return dispatch(list(sys.argv[1:] if argv is None else argv), build_parser())
 
 
+def collect_from_local_service(args, reviews: dict, metadata: dict) -> bool:
+    # The Mac service owns a dedicated Chrome and its login state. Use it for
+    # automatic all-review runs; custom scrolling/manual options use the CLI browser.
+    if not args.url or not args.all or args.manual or args.visible_only or args.browser != "chrome" or args.delay != 2.0:
+        return False
+    endpoint = "http://127.0.0.1:38473"
+    headers = {"Origin": "https://google-maps-reviews.vercel.app"}
+    opener = build_opener(ProxyHandler({}))
+    try:
+        with opener.open(Request(endpoint + "/health", headers=headers), timeout=1) as response:
+            health = json.load(response)
+        if health.get("ready") is not True or health.get("version") != "1.0.0":
+            return False
+    except (OSError, ValueError, AttributeError):
+        return False
+    metadata["collector"] = "このMacの収集サービス"
+    started = time.monotonic()
+    try:
+        if health.get("busy"):
+            raise RuntimeError("このMacでは口コミを収集中です。完了後に再実行してください。")
+        print("このMacの専用Chromeで収集しています。", flush=True)
+        request = Request(endpoint + "/collect", data=json.dumps({"url": args.url}).encode(),
+                          headers=dict(headers, **{"Content-Type": "application/json"}))
+        with opener.open(request, timeout=args.timeout) as response:
+            for line in response:
+                if time.monotonic() - started >= args.timeout:
+                    raise RuntimeError("制限時間に到達しました。取得済みの口コミを保存します。")
+                if not line.startswith(b"data: "):
+                    continue
+                event = json.loads(line[6:])
+                if event["type"] == "error":
+                    raise RuntimeError(event["message"])
+                if event["type"] == "status":
+                    print(event["message"], flush=True)
+                    continue
+                if event["type"] not in {"progress", "done"}:
+                    continue
+                data = event["data"]
+                merge_reviews(reviews, data["reviews"], data["place"], data["sourceUrl"])
+                metadata.update(place_name=data["place"], source_url=data["sourceUrl"],
+                                displayed_total_end=data["displayedTotal"])
+                if data["displayedTotal"] is not None:
+                    metadata.setdefault("displayed_total_start", data["displayedTotal"])
+                print(f"取得済み: {len(reviews)}件 / 画面の総件数: {data['displayedTotal']}", flush=True)
+                if event["type"] == "done":
+                    metadata["stop_reason"] = data["reason"]
+                    metadata["service_verified"] = data["verified"] is True
+                    return True
+        raise RuntimeError("収集サービスとの接続が途中で終了しました。")
+    except KeyboardInterrupt:
+        metadata["stop_reason"] = "ユーザーが中断（取得済みデータを保存）"
+    except Exception as error:
+        metadata.update(stop_reason="エラーによる停止", error=str(error))
+        print(f"収集中に停止しました: {error}", file=sys.stderr)
+    return True
+
+
 def run_collection(args) -> int:
     limit = sys.maxsize if args.all else args.max
     now = datetime.now().astimezone()
@@ -296,6 +354,8 @@ def run_collection(args) -> int:
                       "owner_reply": "サンプルの返信です。", "text_may_be_truncated": False}],
                       "サンプル店舗（架空）", "")
         metadata.update(place_name="サンプル店舗（架空）", source_url="", stop_reason="出力テスト", sample=True)
+    elif collect_from_local_service(args, reviews, metadata):
+        pass
     else:
         try:
             from playwright.sync_api import sync_playwright
@@ -372,7 +432,8 @@ def run_collection(args) -> int:
     rows = list(reviews.values())[:limit]
     metadata["count"] = len(rows)
     if not args.demo:
-        metadata["full_coverage_verified"] = full_coverage_verified(rows, metadata.get("displayed_total_end")) and "error" not in metadata
+        metadata["full_coverage_verified"] = (full_coverage_verified(rows, metadata.get("displayed_total_end"))
+                                              and "error" not in metadata and metadata.get("service_verified", True) is True)
         metadata["truncated_count"] = sum(bool(row.get("text_may_be_truncated")) for row in rows)
         if metadata["full_coverage_verified"]:
             metadata["coverage"] = f"画面の総件数と口コミIDの重複なしの保存件数が一致: {len(rows)}件"

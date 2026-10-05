@@ -88,6 +88,16 @@ pipx版などの設定ファイルは `~/.config/google-maps-reviews/settings.js
 
 ## 全件取得
 
+URLを指定する場合は、次のコマンドで取得します。保存先はデスクトップの `GoogleMap口コミ` です。
+
+```bash
+google-maps-reviews "https://maps.app.goo.gl/店舗の共有URL" --all
+```
+
+Macの収集サービスが起動済みなら、その専用Chromeで収集します。CLIから利用する場合、Webブラウザーのローカルネットワーク許可は不要です。ログインが必要な場合は専用Chromeで行ってください。サービスが起動していない場合や、手動操作・Chromium・独自の待機時間を指定した場合はCLIの収集ブラウザーを使用します。
+
+ブラウザーで店舗を自分で選択する場合：
+
 ```bash
 google-maps-reviews --all --manual --timeout 1200
 ```
