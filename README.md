@@ -12,8 +12,8 @@ google-maps-reviews "https://maps.app.goo.gl/店舗の共有URL" --all
 - 総件数に届く前に読み込みが止まった場合は、再スクロールして制限時間まで再試行
 - 無引数で対話メニューを開き、パラメータを番号で選択
 - 収集から保存まで利用者のMacで実行
-- Codex Skillによる話題別の感情分析・個別返信案・改善計画
-- 統計と根拠をたどれるHTML、業務に使う5種類のCSV
+- Codex Skillによる話題別の感情分析・改善計画・必要時の返信案
+- 統計と根拠をたどれるHTML、用途別シートをまとめた1つのExcel
 
 ## 必要なもの
 
@@ -25,6 +25,8 @@ google-maps-reviews "https://maps.app.goo.gl/店舗の共有URL" --all
 | 通信 | GitHub、Pythonパッケージの配布先、Googleマップへの接続 |
 
 口コミの収集にNode.js、Vercel、GitHubアカウント、APIキーは不要です。AI分析にはCodexアプリまたはログイン済みのCodex CLIを使います。
+
+0.5.0以降は、CLI自身の専用ブラウザーで収集します。起動中の旧Web用収集サービスを自動的に選びません。旧サービスとの互換が必要な場合だけ `--use-service` を指定できます。
 
 PythonやChromeがない場合は、Homebrewを導入済みのMacで次を実行できます。
 
@@ -77,7 +79,9 @@ $google-review-report https://maps.app.goo.gl/店舗の共有URL
 google-maps-reviews report "https://maps.app.goo.gl/店舗の共有URL"
 ```
 
-収集した口コミを分類し、話題別の感情、顧客体験、原因仮説、優先順位付き改善案、個別返信案を含むHTMLと5種類の業務用CSVをデスクトップに保存します。HTMLはオフラインで開けます。本文ありの全件を分析し、評価だけの口コミも星の統計に含めます。
+収集した口コミを分類し、話題別の感情、顧客体験、原因仮説、優先順位付き改善案、希望された場合の返信案を含むHTMLと1つのExcelをデスクトップに保存します。HTMLはオフラインで開けます。本文ありの全件を分析し、評価だけの口コミも星の統計に含めます。
+
+Skillの開始時に返信案の要否を確認します。ターミナルのreportは既定で返信なしです。返信も必要な場合は `--with-replies` を付けてください。
 
 分析はCodexの利用枠を消費し、口コミ本文をCodexのモデルへ送信します。返信は投稿前確認が必要な下書きです。導入要件、再開方法、事業情報の渡し方、分析の根拠は [レポートの使い方](REPORTING.md) を参照してください。
 
@@ -213,13 +217,13 @@ google-maps-reviews setup --browser chrome
 
 セットアップと同じ1コマンドを再実行すると最新のmainへ更新できます。設定と出力ファイルは保持します。既存のpipx版も所有情報を確認して更新します。別ツールのコマンドは上書きしません。
 
-バージョンを固定する場合は、セットアップに `--ref v0.4.0` を付けます。
+バージョンを固定する場合は、セットアップに `--ref v0.5.0` を付けます。
 
 ### pipxから導入する場合
 
 ```bash
 brew install pipx
-pipx install 'git+https://github.com/atsuki-sakai/google-maps-reviews.git@v0.4.0'
+pipx install 'git+https://github.com/atsuki-sakai/google-maps-reviews.git@v0.5.0'
 pipx ensurepath
 google-maps-reviews setup --browser chrome
 ```

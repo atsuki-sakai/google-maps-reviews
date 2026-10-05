@@ -18,6 +18,27 @@ from google_maps_reviews import cli, console
 
 
 class InstalledCliTest(unittest.TestCase):
+    def test_place_identity_accepts_url_variants_and_rejects_a_different_place(self):
+        original = "https://www.google.com/maps/place/Store/data=!1s0x123:0x456!9m1!1b1?hl=ja"
+        variant = "https://www.google.com/maps/place/Store/data=%211s0x123%3A0x456!8m2!3d0!4d0?hl=en"
+        cli.ensure_same_place(original, variant)
+        cli.ensure_same_place(original, "https://maps.google.com/?cid=1110")
+        with self.assertRaisesRegex(ValueError, "別施設"):
+            cli.ensure_same_place(original, "https://www.google.com/maps/place/Other/data=!1s0x789:0xabc!9m1!1b1")
+        self.assertIsNone(cli.place_identity("https://maps.app.goo.gl/unknown-target"))
+
+    def test_no_service_never_connects_to_a_running_legacy_service(self):
+        args = cli.build_parser().parse_args(["https://maps.app.goo.gl/requested-store", "--all", "--no-service"])
+        with patch.object(cli, "build_opener") as opener:
+            self.assertFalse(cli.collect_from_local_service(args, {}, {}))
+            opener.assert_not_called()
+
+    def test_default_collection_does_not_discover_a_legacy_service(self):
+        args = cli.build_parser().parse_args(["https://maps.app.goo.gl/requested-store", "--all"])
+        with patch.object(cli, "build_opener") as opener:
+            self.assertFalse(cli.collect_from_local_service(args, {}, {}))
+            opener.assert_not_called()
+
     def test_unsupported_os_does_not_start_collection(self):
         with patch.object(sys, "platform", "linux"), patch.object(cli, "run_collection") as collecting, redirect_stderr(io.StringIO()):
             self.assertEqual(cli.main(["--demo"]), 1)
@@ -239,7 +260,7 @@ class LocalServiceCliTest(unittest.TestCase):
         opener = MagicMock()
         opener.open.side_effect = [io.BytesIO(b'{"ready":true,"version":"1.0.0","busy":false}'), self.stream(events)]
         with tempfile.TemporaryDirectory() as folder, patch.object(cli, "build_opener", return_value=opener), redirect_stdout(io.StringIO()):
-            self.assertEqual(cli.main(["https://www.google.com/maps/test", "--all", "--output-dir", folder]), 0)
+            self.assertEqual(cli.main(["https://www.google.com/maps/test", "--all", "--use-service", "--output-dir", folder]), 0)
             data = json.loads(next(Path(folder).glob("*.json")).read_text(encoding="utf-8"))
             self.assertEqual(data["metadata"]["count"], 2)
             self.assertTrue(data["metadata"]["full_coverage_verified"])
@@ -253,7 +274,7 @@ class LocalServiceCliTest(unittest.TestCase):
             opener.open.side_effect = [io.BytesIO(b'{"ready":true,"version":"1.0.0"}'),
                                        self.stream([{"type": "progress", "data": self.payload(1)}, *ending])]
             with self.subTest(ending=ending), tempfile.TemporaryDirectory() as folder, patch.object(cli, "build_opener", return_value=opener), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-                self.assertEqual(cli.main(["https://www.google.com/maps/test", "--all", "--output-dir", folder]), 2)
+                self.assertEqual(cli.main(["https://www.google.com/maps/test", "--all", "--use-service", "--output-dir", folder]), 2)
                 data = json.loads(next(Path(folder).glob("*.json")).read_text(encoding="utf-8"))
                 self.assertEqual(data["metadata"]["count"], 1)
                 self.assertFalse(data["metadata"]["full_coverage_verified"])
@@ -268,7 +289,7 @@ class LocalServiceCliTest(unittest.TestCase):
         opener.open.side_effect = [io.BytesIO(b'{"ready":true,"version":"1.0.0"}'), self.stream(events)]
         output = io.StringIO()
         with tempfile.TemporaryDirectory() as folder, patch.object(cli, "build_opener", return_value=opener), redirect_stdout(output):
-            self.assertEqual(cli.main(["https://www.google.com/maps/test", "--all", "--output-dir", folder]), 0)
+            self.assertEqual(cli.main(["https://www.google.com/maps/test", "--all", "--use-service", "--output-dir", folder]), 0)
         self.assertEqual(output.getvalue().count("取得済み: 1件"), 1)
         self.assertEqual(output.getvalue().count("取得済み: 2件"), 1)
 
@@ -300,7 +321,7 @@ class LocalServiceCliTest(unittest.TestCase):
         opener = MagicMock()
         opener.open.return_value = io.BytesIO(b'{"ready":true,"version":"1.0.0","busy":true}')
         with tempfile.TemporaryDirectory() as folder, patch.object(cli, "build_opener", return_value=opener), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-            self.assertEqual(cli.main(["https://www.google.com/maps/test", "--all", "--output-dir", folder]), 1)
+            self.assertEqual(cli.main(["https://www.google.com/maps/test", "--all", "--use-service", "--output-dir", folder]), 1)
             self.assertEqual(list(Path(folder).iterdir()), [])
             opener.open.assert_called_once()
 
@@ -385,7 +406,7 @@ class LocalServiceCliTest(unittest.TestCase):
         opener.open.side_effect = [io.BytesIO(b'{"ready":true,"version":"1.0.0"}'),
                                    self.stream([{"type": "done", "data": self.payload(2)}])]
         with tempfile.TemporaryDirectory() as folder, patch.object(cli, "build_opener", return_value=opener), redirect_stdout(io.StringIO()):
-            self.assertEqual(cli.main(["https://www.google.com/maps/test", "--all", "--timeout", "1200", "--output-dir", folder]), 0)
+            self.assertEqual(cli.main(["https://www.google.com/maps/test", "--all", "--use-service", "--timeout", "1200", "--output-dir", folder]), 0)
             self.assertEqual(json.loads(opener.open.call_args.args[0].data)["timeout"], 1200)
 
     def test_unverified_service_result_is_not_reported_as_complete(self):
@@ -393,7 +414,7 @@ class LocalServiceCliTest(unittest.TestCase):
         opener = MagicMock()
         opener.open.side_effect = [io.BytesIO(b'{"ready":true,"version":"1.0.0"}'), self.stream([{"type": "done", "data": data}])]
         with tempfile.TemporaryDirectory() as folder, patch.object(cli, "build_opener", return_value=opener), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-            self.assertEqual(cli.main(["https://www.google.com/maps/test", "--all", "--output-dir", folder]), 2)
+            self.assertEqual(cli.main(["https://www.google.com/maps/test", "--all", "--use-service", "--output-dir", folder]), 2)
             metadata = json.loads(next(Path(folder).glob("*.json")).read_text())["metadata"]
             self.assertEqual(metadata["count"], 2)
             self.assertFalse(metadata["full_coverage_verified"])
@@ -405,7 +426,7 @@ class LocalServiceCliTest(unittest.TestCase):
             with patch.object(cli, "build_opener") as opener:
                 self.assertFalse(cli.collect_from_local_service(args, {}, {}))
                 opener.assert_not_called()
-        args = cli.build_parser().parse_args(["https://www.google.com/maps/test", "--all"])
+        args = cli.build_parser().parse_args(["https://www.google.com/maps/test", "--all", "--use-service"])
         for response in (b'{"ready":false,"version":"1.0.0"}', b'{"ready":true,"version":"another-service"}'):
             opener = MagicMock()
             opener.open.return_value = io.BytesIO(response)

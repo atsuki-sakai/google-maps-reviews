@@ -13,7 +13,7 @@ import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 from urllib.request import ProxyHandler, Request, build_opener
 
 from . import __version__
@@ -44,6 +44,30 @@ def maps_url(value: str) -> str:
     if parsed.scheme != "https" or not valid or parsed.username or parsed.password:
         raise argparse.ArgumentTypeError("GoogleマップのHTTPS URLを指定してください。")
     return value
+
+
+def place_identity(value: str) -> tuple[str, str] | None:
+    """Read a stable place identifier when the Maps URL contains one."""
+    value = unquote(value)
+    query = parse_qs(urlparse(value).query)
+    pair = re.search(r"!1s0x[0-9a-f]+:0x([0-9a-f]+)(?:!|[?&#]|$)", value, re.I)
+    if pair:
+        return "cid", str(int(pair.group(1), 16))
+    cid = query.get("cid", [""])[0]
+    if re.fullmatch(r"[0-9]+", cid):
+        return "cid", str(int(cid))
+    place_id = query.get("query_place_id", query.get("place_id", [""]))[0]
+    encoded = re.search(r"!1s(ChIJ[\w-]+)(?:!|[?&#]|$)", value)
+    if place_id or encoded:
+        return "place_id", place_id or encoded.group(1)
+    entity = re.search(r"!(?:16|1)s(/(?:g|m)/[\w-]+)(?:!|[?&#]|$)", value)
+    return ("entity", entity.group(1)) if entity else None
+
+
+def ensure_same_place(expected: str, actual: str):
+    first, second = place_identity(expected), place_identity(actual)
+    if first and second and first[0] == second[0] and first != second:
+        raise ValueError("指定URLとは別施設の口コミ画面です。指定施設の口コミを開いて再実行してください。")
 
 
 def positive_int(value: str) -> int:
@@ -317,6 +341,10 @@ def build_parser():
     parser.add_argument("--timeout", type=positive_int, default=300, help="収集の制限秒数（既定:300、手動操作時間を除く）")
     parser.add_argument("--output-dir", type=Path, default=Path.home() / "Desktop" / "GoogleMap口コミ")
     parser.add_argument("--browser", choices=("chrome", "chromium"), default="chrome")
+    service = parser.add_mutually_exclusive_group()
+    service.add_argument("--no-service", action="store_true", help="CLIの専用ブラウザーで収集（既定）")
+    service.add_argument("--use-service", dest="no_service", action="store_false", help="互換用: 起動中の旧Web用収集サービスを使用")
+    parser.set_defaults(no_service=True)
     parser.add_argument("--demo", action="store_true", help="実在の口コミではないサンプルで出力確認")
     parser.add_argument("--interactive", action="store_true", help="対話メニューを開く（ターミナル専用）")
     parser.add_argument("--use-settings", action="store_true", help="保存設定を使用。明示したオプションを優先")
@@ -333,9 +361,9 @@ def main(argv=None) -> int:
 
 
 def collect_from_local_service(args, reviews: dict, metadata: dict) -> bool:
-    # The Mac service owns a dedicated Chrome and its login state. Use it for
-    # automatic all-review runs; custom scrolling/manual options use the CLI browser.
-    if not args.url or not args.all or args.manual or args.visible_only or args.browser != "chrome" or args.delay != 2.0:
+    # Compatibility is explicit: never discover and use a development Web
+    # service for an ordinary CLI run or a report request.
+    if args.no_service or not args.url or not args.all or args.manual or args.visible_only or args.browser != "chrome" or args.delay != 2.0:
         return False
     endpoint = "http://127.0.0.1:38473"
     headers = {"Origin": "https://google-maps-reviews.vercel.app"}
@@ -404,6 +432,7 @@ def run_collection(args) -> int:
     now = datetime.now().astimezone()
     stamp = now.strftime("%Y%m%d_%H%M%S_%f")
     metadata = {"collected_at": now.isoformat(timespec="seconds"),
+                "requested_url": args.url or "",
                 "requested_max": "全件" if args.all else "読み込み済み全件" if args.visible_only else args.max,
                 "coverage": "画面から読み取れた口コミのみ。全件取得の保証はありません。"}
     reviews = {}
@@ -429,6 +458,9 @@ def run_collection(args) -> int:
                     page = context.pages[0] if context.pages else context.new_page()
                     page.set_default_timeout(10000)
                     page.goto(args.url or "https://www.google.com/maps?hl=ja", wait_until="domcontentloaded", timeout=45000)
+                    expected_url = page.url if args.url else ""
+                    ensure_same_place(args.url or "", expected_url)
+                    metadata.update(resolved_url=expected_url, collector="CLIの専用ブラウザー")
                     prepare_reviews(page, args.manual or not args.url)
                     metadata.update(source_url=page.url)
                     started = time.monotonic()
@@ -442,6 +474,7 @@ def run_collection(args) -> int:
                             break
                         expand_text(page, expanded_ids, deadline=started + args.timeout)
                         data = page.evaluate(extractor)
+                        ensure_same_place(expected_url, data["source_url"])
                         for row in data["reviews"]:
                             if row.get("text_may_be_truncated"):
                                 expanded_ids.discard(row["review_id"])
@@ -550,6 +583,8 @@ def run_collection(args) -> int:
             retry = ["google-maps-reviews", args.url, "--all", "--timeout", str(max(1200, args.timeout * 2))]
             if args.manual:
                 retry.append("--manual")
+            if args.no_service:
+                retry.append("--no-service")
             if args.browser != "chrome":
                 retry += ["--browser", args.browser]
             if args.delay != 2.0:

@@ -1,14 +1,14 @@
-import csv
 import io
 import json
 import re
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
+from openpyxl import load_workbook
 from google_maps_reviews import reporting as r
 from google_maps_reviews import report_cli
 
@@ -26,7 +26,7 @@ class ReportingTest(unittest.TestCase):
             {"review_id": "review-3", "rating": 4, "date_text": "1 年前", "text": "", "owner_reply": ""},
         ]
         self.save_source()
-        r.prepare(self.source, self.output)
+        r.prepare(self.source, self.output, reply_drafts=True)
         self.sha = r.read_json(self.output / "manifest.json")["source_sha256"]
         self.annotations = [
             {"key": "R0001", "sentiment": "mixed", "confidence": "high", "language": "ja", "summary_ja": "味は好評、待ち時間は不満", "aspects": [
@@ -137,12 +137,65 @@ class ReportingTest(unittest.TestCase):
         payload = json.loads(re.search(r'<script id="report-data" type="application/json">(.*?)</script>', document, re.S)[1])
         self.assertEqual(payload["rows"][0]["reply_draft"], malicious)
         self.assertNotIn("author", payload["rows"][0])
-        with (self.output / "分類済み口コミ.csv").open(encoding="utf-8-sig", newline="") as stream:
-            rows = list(csv.DictReader(stream))
-        self.assertEqual(rows[0]["本文"], self.raw[0]["text"])
-        self.assertEqual(rows[0]["投稿者"], "'=AUTHOR()")
-        self.assertEqual(rows[0]["要約"], "'=FORMULA()")
-        self.assertEqual(len(list(self.output.glob("*.csv"))), 5)
+        book = load_workbook(self.output / "口コミ分析.xlsx")
+        sheet = book["分類済み口コミ"]
+        self.assertEqual(sheet["F2"].value, self.raw[0]["text"])
+        self.assertEqual(sheet["C2"].value, "=AUTHOR()")
+        self.assertEqual(sheet["I2"].value, "=FORMULA()")
+        self.assertEqual(sheet["C2"].data_type, "s")
+        self.assertEqual(sheet["I2"].data_type, "s")
+        self.assertEqual(sheet.freeze_panes, "A2")
+        self.assertEqual(sheet.auto_filter.ref, "A1:M4")
+        self.assertEqual(book["返信案"].max_row, 4)
+        self.assertEqual(book["カテゴリ集計"]["B2"].data_type, "n")
+        book.close()
+        self.assertEqual(len(list(self.output.glob("*.csv"))), 0)
+        self.assertEqual(len(list(self.output.glob("*.xlsx"))), 1)
+
+    def test_analysis_without_replies_needs_no_reply_fields_or_reply_sheet(self):
+        manifest = r.read_json(self.output / "manifest.json")
+        manifest["reply_drafts"] = False
+        r.write_json(self.output / "manifest.json", manifest)
+        for row in self.annotations:
+            row.pop("reply_draft")
+            row.pop("reply_language")
+        self.save_annotations()
+        self.synthesis.pop("reply_policy")
+        r.write_json(self.output / "synthesis.json", self.synthesis)
+        r.render(self.output)
+        _, _, rows = r.load_annotations(self.output)
+        self.assertTrue(all(row["reply_draft"] == "" for row in rows))
+        self.assertNotIn("返信", " ".join(rows[-1]["checks"]))
+        book = load_workbook(self.output / "口コミ分析.xlsx")
+        self.assertNotIn("返信案", book.sheetnames)
+        self.assertEqual(len(book.sheetnames), 6)
+        self.assertEqual(book["分類済み口コミ"].max_row, 4)
+        book.close()
+
+    def test_reply_preference_is_saved_at_preparation_and_is_opt_in(self):
+        default = self.root / "without-replies"
+        enabled = self.root / "with-replies"
+        with redirect_stdout(io.StringIO()):
+            report_cli.report_main(["prepare", "--input", str(self.source), "--output-dir", str(default)])
+            report_cli.report_main(["prepare", "--input", str(self.source), "--output-dir", str(enabled), "--with-replies"])
+        self.assertFalse(r.read_json(default / "manifest.json")["reply_drafts"])
+        self.assertTrue(r.read_json(enabled / "manifest.json")["reply_drafts"])
+
+    def test_workbook_preserves_cause_checks_and_editable_action_status(self):
+        self.synthesis["concerns"] = [{"title": "提供時間", "observation": "提供が遅いという記述", "hypothesis": "提供順の確認が必要", "alternative": "混雑の可能性", "verify": "提供時間を記録する", "evidence_ids": ["R0001"]}]
+        self.synthesis["actions"] = [{"id": "A01", "title": "提供時間を確認", "detail": "記録から運営を確かめる", "owner": "担当案", "timeframe": "0〜7日", "priority": "高", "priority_reason": "本文に待ち時間の指摘", "effort": "低", "kpi": "提供時間", "baseline": "未測定", "target": "まず計測する", "evidence_ids": ["R0001"]}]
+        r.write_json(self.output / "synthesis.json", self.synthesis)
+        r.render(self.output)
+        book = load_workbook(self.output / "口コミ分析.xlsx")
+        self.assertEqual(book["分析と提案"]["D2"].value, "提供順の確認が必要")
+        self.assertEqual(book["分析と提案"]["F2"].value, "提供時間を記録する")
+        self.assertEqual(book["改善アクション"]["L2"].value, "R0001")
+        validations = list(book["改善アクション"].data_validations.dataValidation)
+        self.assertEqual(len(validations), 1)
+        self.assertIn("進行中", validations[0].formula1)
+        self.assertEqual(str(validations[0].sqref), "M2")
+        self.assertFalse(any(cell.data_type == "f" for sheet in book for row in sheet for cell in row))
+        book.close()
 
     def test_duplicate_source_ids_and_existing_manifest_are_not_overwritten(self):
         with self.assertRaisesRegex(ValueError, "上書き"):
@@ -174,6 +227,68 @@ class ReportingTest(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 report_cli.report_main(["https://maps.app.goo.gl/abc"])
             collecting.assert_not_called()
+
+    def test_url_prepare_uses_direct_browser_and_records_only_this_request(self):
+        requested = "https://maps.app.goo.gl/requested-store"
+        resolved = "https://www.google.com/maps/place/Requested/data=!1s0x123:0x456!9m1!1b1"
+        output = self.root / "fresh-request"
+        def collect(args):
+            self.assertTrue(args.no_service)
+            self.assertEqual(args.url, requested)
+            self.assertTrue(args.all)
+            r.write_json(args.output_dir / "new.json", {
+                "metadata": {"place_name": "今回の施設", "requested_url": args.url,
+                             "resolved_url": resolved, "source_url": resolved,
+                             "displayed_total_end": 3, "full_coverage_verified": True},
+                "reviews": self.raw,
+            })
+            return 0
+        with patch.object(report_cli.cli, "run_collection", side_effect=collect), redirect_stdout(io.StringIO()):
+            self.assertEqual(report_cli.report_main(["prepare", requested, "--output-dir", str(output)]), 0)
+        manifest = r.read_json(output / "manifest.json")
+        self.assertEqual(manifest["place_name"], "今回の施設")
+        self.assertEqual(manifest["requested_url"], requested)
+        self.assertEqual(manifest["resolved_url"], resolved)
+        self.assertNotEqual(manifest["source_sha256"], self.sha)
+
+    def test_collection_failure_does_not_use_existing_review_or_analysis_files(self):
+        output = self.root / "failed-request"
+        # Both an older source and a valid analysis exist in this test's root.
+        with patch.object(report_cli.cli, "run_collection", return_value=1), \
+                patch.object(report_cli.reporting, "prepare") as preparing, redirect_stderr(io.StringIO()):
+            with self.assertRaisesRegex(ValueError, "指定URL.*収集できません"):
+                report_cli.report_main(["prepare", "https://maps.app.goo.gl/requested-store", "--output-dir", str(output)])
+            preparing.assert_not_called()
+        self.assertFalse((output / "manifest.json").exists())
+        self.assertFalse((output / "source.json").exists())
+        self.assertTrue((self.output / "manifest.json").is_file())
+
+    def test_manual_report_in_a_non_terminal_fails_before_collection(self):
+        with patch.object(report_cli.sys.stdin, "isatty", return_value=False), \
+                patch.object(report_cli.cli, "run_collection") as collecting, redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as result:
+                report_cli.report_main(["prepare", "https://maps.app.goo.gl/requested-store", "--manual"])
+            self.assertEqual(result.exception.code, 2)
+            collecting.assert_not_called()
+
+    def test_prepare_rejects_a_different_request_or_a_changed_place(self):
+        requested = "https://maps.app.goo.gl/requested-store"
+        resolved = "https://www.google.com/maps/place/Requested/data=!1s0x123:0x456!9m1!1b1"
+        other = "https://www.google.com/maps/place/Other/data=!1s0x789:0xabc!9m1!1b1"
+        for metadata in (
+            {"requested_url": "https://maps.app.goo.gl/other-store", "resolved_url": resolved, "source_url": resolved},
+            {"requested_url": requested, "resolved_url": resolved, "source_url": other},
+        ):
+            with self.subTest(metadata=metadata), tempfile.TemporaryDirectory() as folder:
+                output = Path(folder) / "report"
+                def collect(args):
+                    r.write_json(args.output_dir / "unexpected.json", {"metadata": metadata, "reviews": self.raw})
+                    return 0
+                with patch.object(report_cli.cli, "run_collection", side_effect=collect), redirect_stdout(io.StringIO()):
+                    with self.assertRaises(ValueError):
+                        report_cli.report_main(["prepare", requested, "--output-dir", str(output)])
+                self.assertFalse((output / "manifest.json").exists())
+                self.assertFalse((output / "source.json").exists())
 
     def test_skill_install_updates_own_skill_and_refuses_foreign_skill(self):
         parent = self.root / "skills"

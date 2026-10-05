@@ -1,4 +1,4 @@
 interface:
   display_name: "口コミから事業改善レポート"
-  short_description: "店舗URLから口コミを分析し、改善案と返信案を含むHTML・CSVを生成"
-  default_prompt: "$google-review-report を使い、この店舗URLの口コミを取得して詳しい分析・改善案・返信案のHTMLレポートを作成してください。"
+  short_description: "店舗URLから口コミを分析し、改善案を含むHTMLと1つのExcelを生成"
+  default_prompt: "$google-review-report を使い、返信案の要否を確認してから、この店舗URLの口コミを分析しHTMLとExcelにまとめてください。"

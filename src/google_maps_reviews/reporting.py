@@ -4,7 +4,6 @@ Semantic annotations are written by the Skill, never inferred from star ratings.
 """
 from __future__ import annotations
 
-import csv
 import hashlib
 import html
 import json
@@ -12,6 +11,11 @@ import re
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
+
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.datavalidation import DataValidation
 
 from . import __version__
 
@@ -76,7 +80,7 @@ def coverage(metadata: dict, reviews: list[dict]) -> dict:
             "stop_reason": str(metadata.get("stop_reason", "不明"))}
 
 
-def prepare(source: Path, output: Path, *, context: Path | None = None, batch_size: int = 20) -> Path:
+def prepare(source: Path, output: Path, *, context: Path | None = None, batch_size: int = 20, reply_drafts: bool = False) -> Path:
     if not 1 <= batch_size <= 50:
         raise ValueError("分析の分割件数は1〜50件で指定してください。")
     metadata, reviews, digest = source_data(source)
@@ -104,9 +108,11 @@ def prepare(source: Path, output: Path, *, context: Path | None = None, batch_si
         write_json(output / "packets" / name, {"source_sha256": digest, "reviews": text_reviews[start:start + batch_size]})
         names.append(name)
     (output / "annotations").mkdir(exist_ok=True)
-    manifest = {"schema_version": 1, "tool_version": __version__, "source_sha256": digest,
+    manifest = {"schema_version": 1, "tool_version": __version__, "source_sha256": digest, "reply_drafts": reply_drafts,
                 "place_name": str(metadata.get("place_name") or reviews[0].get("place_name") or "店舗"),
                 "collected_at": str(metadata.get("collected_at", "不明")),
+                "requested_url": str(metadata.get("requested_url", "")),
+                "resolved_url": str(metadata.get("resolved_url", "")),
                 "source_url": str(metadata.get("source_url", "")), "coverage": coverage(metadata, reviews),
                 "keys": key_map, "batches": names, "prepared_at": datetime.now().astimezone().isoformat(timespec="seconds")}
     write_json(output / "manifest.json", manifest)
@@ -143,14 +149,14 @@ def normalized(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
-def validate_annotation(row: dict, raw: dict, key: str):
+def validate_annotation(row: dict, raw: dict, key: str, *, reply_drafts=True):
     if not isinstance(row, dict) or row.get("key") != key:
         raise ValueError(f"{key}: keyが一致しません。")
     if row.get("sentiment") not in set(SENTIMENTS) - {"unavailable"}:
         raise ValueError(f"{key}: 本文の感情分類が不正です。")
     if row.get("confidence") not in CONFIDENCES:
         raise ValueError(f"{key}: confidenceはhigh/medium/lowです。")
-    for field in ("summary_ja", "language", "reply_draft", "reply_language"):
+    for field in ("summary_ja", "language") + (("reply_draft", "reply_language") if reply_drafts else ()):
         string(row.get(field), f"{key}.{field}")
     string_list(row.get("checks"), f"{key}.checks")
     aspects = row.get("aspects")
@@ -169,7 +175,7 @@ def validate_annotation(row: dict, raw: dict, key: str):
         string(aspect.get("detail"), f"{key}.detail")
 
 
-def rating_only_annotation(key: str, raw: dict) -> dict:
+def rating_only_annotation(key: str, raw: dict, *, reply_drafts=True) -> dict:
     rating = raw.get("rating")
     if rating and rating <= 2:
         reply = "評価をお寄せいただき、ありがとうございます。差し支えなければ、ご利用時に感じられた点をお聞かせください。"
@@ -179,11 +185,15 @@ def rating_only_annotation(key: str, raw: dict) -> dict:
         reply = "評価をお寄せいただき、ありがとうございます。今後の参考として、ご感想もお聞かせいただけましたら幸いです。"
     return {"key": key, "sentiment": "unavailable", "confidence": "low", "language": "unknown",
             "summary_ja": "評価のみ。体験の内容・感情・原因は判断できません。", "aspects": [],
-            "reply_draft": reply, "reply_language": "ja", "checks": ["本文なし・返信言語と内容を確認", "定型の返信候補"]}
+            "reply_draft": reply if reply_drafts else "", "reply_language": "ja" if reply_drafts else "",
+            "checks": ["本文なし・返信言語と内容を確認", "定型の返信候補"] if reply_drafts else ["本文なし・体験の詳細は不明"]}
 
 
 def load_annotations(output: Path, *, require_complete=True) -> tuple[dict, dict, list[dict]]:
     manifest, _metadata, keys = workspace(output)
+    reply_drafts = manifest.get("reply_drafts", True)
+    if type(reply_drafts) is not bool:
+        raise ValueError("manifest.reply_draftsはtrue/falseで指定してください。")
     rows = {}
     for name in manifest["batches"]:
         path = output / "annotations" / name
@@ -200,14 +210,14 @@ def load_annotations(output: Path, *, require_complete=True) -> tuple[dict, dict
             key = row.get("key") if isinstance(row, dict) else None
             if key not in packet_keys or key in rows:
                 raise ValueError(f"{name}: 未知または重複したkeyです: {key}")
-            validate_annotation(row, keys[key], key)
+            validate_annotation(row, keys[key], key, reply_drafts=reply_drafts)
             rows[key] = row
             batch_keys.append(key)
         if set(batch_keys) != packet_keys:
             raise ValueError(f"{name}: 口コミが抜けています: {sorted(packet_keys - set(batch_keys))}")
     for key, raw in keys.items():
         if not raw.get("text", "").strip():
-            rows[key] = rating_only_annotation(key, raw)
+            rows[key] = rating_only_annotation(key, raw, reply_drafts=reply_drafts)
     if require_complete and set(rows) != set(keys):
         raise ValueError("本文の分析が全件揃っていません。")
     merged = []
@@ -215,11 +225,13 @@ def load_annotations(output: Path, *, require_complete=True) -> tuple[dict, dict
         if key not in rows:
             continue
         row = dict(rows[key])
+        if not reply_drafts:
+            row.update(reply_draft="", reply_language="")
         row["raw"] = keys[key]
         row["checks"] = list(row["checks"])
         if keys[key].get("text_may_be_truncated"):
             row["checks"].append("原文の省略表示あり")
-        if keys[key].get("owner_reply"):
+        if reply_drafts and keys[key].get("owner_reply"):
             row["checks"].append("既存返信あり・差し替え候補として確認")
         if row["confidence"] == "low" and keys[key].get("text", "").strip():
             row["checks"].append("分類の確信度が低い")
@@ -237,8 +249,10 @@ def load_synthesis(output: Path, manifest: dict, keys: dict) -> dict:
     data = read_json(output / "synthesis.json")
     if not isinstance(data, dict) or data.get("source_sha256") != manifest["source_sha256"]:
         raise ValueError("synthesis.jsonの元データのハッシュが一致しません。")
-    for field in ("headline", "executive_summary", "business_type", "reply_policy"):
+    for field in ("headline", "executive_summary", "business_type") + (("reply_policy",) if manifest.get("reply_drafts", True) else ()):
         string(data.get(field), f"synthesis.{field}")
+    if not manifest.get("reply_drafts", True):
+        data["reply_policy"] = ""
     for section in ("journey", "strengths", "concerns", "opportunities", "actions"):
         if not isinstance(data.get(section), list):
             raise ValueError(f"synthesis.{section}は配列で指定してください。")
@@ -308,19 +322,44 @@ def statistics(manifest: dict, rows: list[dict]) -> dict:
             "coverage": manifest["coverage"]}
 
 
-def csv_cell(value):
-    text = "" if value is None else str(value)
-    if text.lstrip().startswith(("=", "+", "-", "@")) or text.startswith(("\t", "\r")):
-        return "'" + text
-    return text
-
-
-def export_csv(path: Path, headers: list[str], rows):
-    with path.open("w", encoding="utf-8-sig", newline="") as stream:
-        writer = csv.writer(stream)
-        writer.writerow(headers)
-        for row in rows:
-            writer.writerow([csv_cell(v) for v in row])
+def write_sheet(book: Workbook, name: str, headers: list[str], rows):
+    sheet = book.create_sheet(name)
+    sheet.append(headers)
+    for row in rows:
+        sheet.append(row)
+    sheet.freeze_panes = "A2"
+    sheet.auto_filter.ref = sheet.dimensions
+    sheet.sheet_view.zoomScale = 85
+    sheet.row_dimensions[1].height = 36
+    for column, header in enumerate(headers, 1):
+        width = 60 if any(word in header for word in ("本文", "引用", "解釈", "内容", "要約", "理由", "仮説", "確認方法", "機会", "返信案")) else 28 if any(word in header for word in ("URL", "日時", "日付", "カテゴリ", "口コミID")) else 18
+        sheet.column_dimensions[get_column_letter(column)].width = width
+    for row in sheet:
+        if row[0].row > 1:
+            lines = max((len(str(cell.value or "")) * 2 // sheet.column_dimensions[cell.column_letter].width + 1 for cell in row), default=1)
+            sheet.row_dimensions[row[0].row].height = min(150, max(30, lines * 15))
+        for cell in row:
+            # Original review/model strings are literal Excel text, including
+            # leading '='. Preserve text without allowing formula execution.
+            if isinstance(cell.value, str):
+                cell.data_type = "s"
+            cell.font = Font(name="Arial", size=10, color="253444")
+            cell.alignment = Alignment(vertical="top", wrap_text=True)
+            if cell.row == 1:
+                cell.font = Font(name="Arial", size=10, bold=True, color="FFFFFF")
+                cell.fill = PatternFill("solid", fgColor="263F52")
+            elif cell.row % 2 == 0:
+                cell.fill = PatternFill("solid", fgColor="F2F5F7")
+            if cell.row > 1 and isinstance(cell.value, float):
+                cell.number_format = "0.00"
+    if name == "改善アクション" and sheet.max_row > 1:
+        column = get_column_letter(sheet.max_column)
+        states = DataValidation(type="list", formula1='"未着手・事業者確認,進行中,完了,保留"')
+        sheet.add_data_validation(states)
+        states.add(f"{column}2:{column}{sheet.max_row}")
+        for row in range(2, sheet.max_row + 1):
+            sheet[f"{column}{row}"].fill = PatternFill("solid", fgColor="FFF1CC")
+    return sheet
 
 
 def render(output: Path) -> Path:
@@ -331,16 +370,41 @@ def render(output: Path) -> Path:
     write_json(output / "statistics.json", stats)
     write_json(output / "analysis.json", {"source_sha256": manifest["source_sha256"], "generated_at": generated_at,
                                          "reviews": [{k: v for k, v in r.items() if k != "raw"} for r in rows], "synthesis": synthesis})
-    export_csv(output / "分類済み口コミ.csv", ["管理ID", "口コミID", "投稿者", "星", "表示日付", "本文", "本文感情", "カテゴリ", "要約", "確信度", "要確認", "既存返信", "収集日時"],
+    book = Workbook()
+    book.remove(book.active)
+    write_sheet(book, "概要", ["項目", "内容"], [
+        ["施設名", manifest["place_name"]], ["取得元URL", manifest["source_url"]],
+        ["入力URL", manifest.get("requested_url", "")], ["取得日時", manifest["collected_at"]],
+        ["生成日時", generated_at], ["保存件数", stats["count"]], ["画面の総件数", manifest["coverage"]["displayed_total"]],
+        ["本文あり", stats["text_count"]], ["評価のみ", stats["rating_only_count"]], ["平均星", stats["mean"]],
+        ["全件照合", "照合済み" if manifest["coverage"]["full_coverage_verified"] else "未確認・取得した範囲の分析"],
+        ["停止理由", manifest["coverage"]["stop_reason"]], ["返信案", "生成あり" if manifest.get("reply_drafts", True) else "生成なし"],
+        ["全体概要", synthesis["executive_summary"]], ["業種", synthesis["business_type"]],
+        ["利用方法", "管理IDで原文・根拠・改善案を照合できます。改善アクションの状態列は実行状況に合わせて変更してください。集計は生成時点の値です。"],
+        ["原文SHA256", manifest["source_sha256"]],
+    ] + [[f"星{i}の件数", stats["stars"][str(i)]] for i in range(5, 0, -1)]
+      + [[f"本文感情：{title}", stats["sentiments"][code]] for code, title in SENTIMENTS.items()]
+      + [[f"{group['label']}：件数", group["count"]] for group in stats["cohorts"]])
+    write_sheet(book, "分類済み口コミ", ["管理ID", "口コミID", "投稿者", "星", "表示日付", "本文", "本文感情", "カテゴリ", "要約", "確信度", "要確認", "既存返信", "収集日時"],
                ([r["key"], r["raw"]["review_id"], r["raw"].get("author", ""), r["raw"].get("rating"), r["raw"].get("date_text", ""), r["raw"].get("text", ""), SENTIMENTS[r["sentiment"]], " / ".join(CATEGORIES[a["category"]] for a in r["aspects"]), r["summary_ja"], CONFIDENCES[r["confidence"]], " / ".join(r["checks"]), r["raw"].get("owner_reply", ""), manifest["collected_at"]] for r in rows))
-    export_csv(output / "話題別根拠.csv", ["管理ID", "口コミID", "カテゴリ", "感情", "根拠引用", "解釈"],
+    write_sheet(book, "話題別根拠", ["管理ID", "口コミID", "カテゴリ", "感情", "根拠引用", "解釈"],
                ([r["key"], r["raw"]["review_id"], CATEGORIES[a["category"]], SENTIMENTS[a["polarity"]], a["quote"], a["detail"]] for r in rows for a in r["aspects"]))
-    export_csv(output / "返信案.csv", ["管理ID", "口コミID", "投稿者", "星", "本文", "要確認", "既存返信", "返信言語", "返信案", "状態"],
+    if manifest.get("reply_drafts", True):
+        write_sheet(book, "返信案", ["管理ID", "口コミID", "投稿者", "星", "本文", "要確認", "既存返信", "返信言語", "返信案", "状態"],
                ([r["key"], r["raw"]["review_id"], r["raw"].get("author", ""), r["raw"].get("rating"), r["raw"].get("text", ""), " / ".join(r["checks"]), r["raw"].get("owner_reply", ""), r["reply_language"], r["reply_draft"], "既存返信あり・変更は要確認" if r["raw"].get("owner_reply") else "下書き・投稿前確認"] for r in rows))
-    export_csv(output / "カテゴリ集計.csv", ["カテゴリ", "言及口コミ数", "本文あり口コミに占める割合%", "肯定", "否定", "肯否混在", "中立", "否定または混在", "本文あり母数"],
+    write_sheet(book, "カテゴリ集計", ["カテゴリ", "言及口コミ数", "本文あり口コミに占める割合%", "肯定", "否定", "肯否混在", "中立", "否定または混在", "本文あり母数"],
                ([c["title"], c["mentions"], c["share_text_pct"], c["positive"], c["negative"], c["mixed"], c["neutral"], c["negative_or_mixed"], len([r for r in rows if r["sentiment"] != "unavailable"])] for c in stats["categories"]))
-    export_csv(output / "改善アクション.csv", ["アクションID", "改善案", "実行内容", "優先度", "優先度の理由", "担当案", "着手からの期間案", "工数案", "検証指標", "現状値", "目標案", "根拠口コミ", "状態"],
+    write_sheet(book, "改善アクション", ["アクションID", "改善案", "実行内容", "優先度", "優先度の理由", "担当案", "着手からの期間案", "工数案", "検証指標", "現状値", "目標案", "根拠口コミ", "状態"],
                ([a["id"], a["title"], a["detail"], a["priority"], a["priority_reason"], a["owner"], a["timeframe"], a["effort"], a["kpi"], a["baseline"], a["target"], " / ".join(a["evidence_ids"]), "未着手・事業者確認"] for a in synthesis["actions"]))
+    write_sheet(book, "分析と提案", ["区分", "項目", "観察・内容", "原因の仮説", "別の説明", "確認方法", "摩擦・確認点", "機会", "根拠口コミ"],
+                ([label, item.get("title", item.get("stage", "")), item.get("observation", ""), item.get("hypothesis", ""),
+                  item.get("alternative", ""), item.get("verify", ""), item.get("friction", ""), item.get("opportunity", ""), " / ".join(item["evidence_ids"])]
+                 for section, label in [("journey", "顧客体験"), ("strengths", "強み"), ("concerns", "課題"), ("opportunities", "事業機会")]
+                 for item in synthesis[section]))
+    temporary = output / "口コミ分析.tmp.xlsx"
+    book.save(temporary)
+    book.close()
+    temporary.replace(output / "口コミ分析.xlsx")
     safe_rows = []
     for r in rows:
         safe_rows.append({k: v for k, v in r.items() if k != "raw"} | {"rating": r["raw"].get("rating"), "date": r["raw"].get("date_text", ""), "text": r["raw"].get("text", ""), "owner_reply": r["raw"].get("owner_reply", "")})
