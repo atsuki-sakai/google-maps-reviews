@@ -17,6 +17,38 @@ from google_maps_reviews import cli, console
 
 
 class InstalledCliTest(unittest.TestCase):
+    def test_unsupported_os_does_not_start_collection(self):
+        with patch.object(sys, "platform", "linux"), patch.object(cli, "run_collection") as collecting, redirect_stderr(io.StringIO()):
+            self.assertEqual(cli.main(["--demo"]), 1)
+            collecting.assert_not_called()
+
+    def test_preview_cards_wait_for_the_full_review_panel(self):
+        page = MagicMock()
+        events = []
+        main = MagicMock()
+        sort = MagicMock()
+        sort.is_visible.return_value = True
+        sort.wait_for.side_effect = lambda **_kwargs: events.append("sort-visible")
+        candidate = MagicMock()
+        candidate.get_attribute.return_value = "口コミ"
+        candidate.inner_text.return_value = "口コミ"
+        candidate.is_visible.return_value = True
+        candidate.click.side_effect = lambda **_kwargs: events.append("open-reviews")
+        tabs = MagicMock()
+        tabs.count.return_value = 1
+        tabs.nth.return_value = candidate
+        def get_role(role, name=None):
+            if role == "main":
+                return MagicMock(first=main)
+            if role == "button":
+                return MagicMock(first=sort)
+            return tabs
+        page.get_by_role.side_effect = get_role
+        page.locator.return_value.count.return_value = 3
+        page.locator.return_value.first.wait_for.side_effect = lambda **_kwargs: events.append("cards-visible")
+        cli.prepare_reviews(page, False)
+        self.assertEqual(events, ["open-reviews", "sort-visible", "cards-visible"])
+
     def test_extractor_is_available_in_installed_package(self):
         source = files("google_maps_reviews").joinpath("extract_reviews.js").read_text(encoding="utf-8")
         self.assertIn("data-review-id", source)
@@ -185,14 +217,16 @@ class LocalServiceCliTest(unittest.TestCase):
         pw = MagicMock()
         pw.chromium.launch_persistent_context.return_value = context
         with tempfile.TemporaryDirectory() as folder, patch.object(cli, "collect_from_local_service", return_value=False), \
-                patch("playwright.sync_api.sync_playwright") as playwright, patch.object(cli, "prepare_reviews"), \
+                patch("playwright.sync_api.sync_playwright") as playwright, patch.object(cli, "collection_browser") as launching, patch.object(cli, "prepare_reviews"), \
                 patch.object(cli, "blocked", return_value=False), patch.object(cli, "expand_text"), \
-                patch.object(cli, "scroll_reviews") as scrolling, redirect_stdout(io.StringIO()):
+                patch.object(cli, "scroll_reviews") as scrolling, patch.object(cli.Path, "home", return_value=Path(folder)), redirect_stdout(io.StringIO()):
             playwright.return_value.__enter__.return_value = pw
+            launching.return_value.__enter__.return_value = context
             self.assertEqual(cli.main([page.url, "--all", "--output-dir", folder]), 0)
             scrolling.assert_not_called()
             page.evaluate.assert_called_once()
-            context.close.assert_called_once()
+            launching.assert_called_once_with(pw, "chrome")
+            launching.return_value.__exit__.assert_called_once()
             metadata = json.loads(next(Path(folder).glob("*.json")).read_text())["metadata"]
             self.assertTrue(metadata["full_coverage_verified"])
             self.assertIn("保存件数が一致", metadata["stop_reason"])
@@ -250,6 +284,13 @@ class InstallerTest(unittest.TestCase):
                    "app_paths": [{"__Path__": str(target), "__type__": "Path"}]}
         data = {"venvs": {"google-maps-reviews": {"metadata": {"main_package": package}}}}
         return command, target, data
+
+    def test_installer_rejects_non_mac_before_changing_files(self):
+        with patch.object(sys, "platform", "linux"), patch.object(self.installer, "check_destination") as destination, redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as result:
+                self.installer.main([])
+            self.assertEqual(result.exception.code, 2)
+            destination.assert_not_called()
 
     def test_existing_pipx_is_updated_without_replacing_link_or_saved_settings(self):
         with tempfile.TemporaryDirectory(prefix="pipx space ") as folder:
@@ -340,18 +381,15 @@ class InstallerTest(unittest.TestCase):
             builder.return_value.create.assert_called_with(environment)
             self.assertEqual(running.call_args.args[0], [str(environment / "bin/google-maps-reviews"), "setup", "--browser", "chrome", "--config", str(settings)])
 
-    def test_authenticated_gh_archive_is_extracted_without_git_checkout_changes(self):
+    def test_public_archive_is_downloaded_without_github_authentication(self):
         with tempfile.TemporaryDirectory() as folder:
             payload = io.BytesIO()
             with zipfile.ZipFile(payload, "w") as archive:
                 archive.writestr("source-root/pyproject.toml", "[project]\nname='google-maps-reviews'\n")
                 archive.writestr("source-root/src/google_maps_reviews/cli.py", "# source\n")
-            def download(command, stdout, check):
-                self.assertEqual(command, ["gh", "api", "repos/atsuki-sakai/google-maps-reviews/zipball/main"])
-                self.assertTrue(check)
-                stdout.write(payload.getvalue())
-            with patch.object(self.installer.subprocess, "run", side_effect=download):
+            with patch.object(self.installer, "urlopen", return_value=io.BytesIO(payload.getvalue())) as download:
                 source = self.installer.fetch_source("main", Path(folder))
+            download.assert_called_once_with("https://codeload.github.com/atsuki-sakai/google-maps-reviews/zip/main", timeout=60)
             self.assertTrue((source / "src/google_maps_reviews/cli.py").is_file())
 
     def test_archive_cannot_write_outside_temporary_source_folder(self):
@@ -359,9 +397,7 @@ class InstallerTest(unittest.TestCase):
             payload = io.BytesIO()
             with zipfile.ZipFile(payload, "w") as archive:
                 archive.writestr("../outside.txt", "unexpected")
-            def download(_command, stdout, check):
-                stdout.write(payload.getvalue())
-            with patch.object(self.installer.subprocess, "run", side_effect=download), self.assertRaises(RuntimeError):
+            with patch.object(self.installer, "urlopen", return_value=io.BytesIO(payload.getvalue())), self.assertRaises(RuntimeError):
                 self.installer.fetch_source("main", Path(folder))
             self.assertFalse((Path(folder) / "outside.txt").exists())
 

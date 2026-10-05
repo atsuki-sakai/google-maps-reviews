@@ -55,7 +55,7 @@ if (command === 'stop' || command === 'uninstall') {
   }
   if (!ready) throw new Error('専用Chromeを起動できませんでした。Review Port用Chromeを閉じてから、もう一度起動してください。');
   console.log('収集サービスを設定しました。次回のMacログイン時にも自動起動します。');
-  console.log('Google Chromeで https://google-maps-reviews.vercel.app/ を開き、「このMacと接続」を押してください。');
+  console.log('収集はターミナルで google-maps-reviews "店舗の共有URL" --all を実行してください。');
 } else {
   throw new Error('install / start / stop / uninstallを指定してください。');
 }

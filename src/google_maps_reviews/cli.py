@@ -8,7 +8,6 @@ import hashlib
 import json
 import re
 import sys
-import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -16,6 +15,7 @@ from urllib.parse import urlparse
 from urllib.request import ProxyHandler, Request, build_opener
 
 from . import __version__
+from .browser import collection_browser
 
 ROOT = Path(__file__).resolve().parent
 REVIEW_CARD_SELECTOR = '[data-review-id]:not([data-review-id] [data-review-id])'
@@ -156,6 +156,7 @@ def export_reviews(rows: list[dict], metadata: dict, output_dir: Path, stem: str
 
 
 def prepare_reviews(page, manual: bool):
+    sort = page.get_by_role("button", name=re.compile(r"並べ替え|sort", re.I)).first
     if not manual:
         # Maps populates the place panel after DOMContentLoaded, especially in a
         # fresh Chrome profile. Do not fall back to stdin while it is still loading.
@@ -163,33 +164,43 @@ def prepare_reviews(page, manual: bool):
             page.get_by_role("main").first.wait_for(state="visible", timeout=45000)
         except Exception:
             pass
-        try:
-            page.locator(REVIEW_CARD_SELECTOR).first.wait_for(state="visible", timeout=15000)
-            return
-        except Exception:
-            pass
-        for role in ("tab", "button"):
-            target = page.get_by_role(role, name=re.compile(r"口コミ|クチコミ|reviews", re.I))
-            for index in range(min(target.count(), 5)):
-                try:
-                    candidate = target.nth(index)
-                    label = (candidate.get_attribute("aria-label") or "") + " " + candidate.inner_text()
-                    if re.search(r"書く|投稿|write|add a review", label, re.I):
-                        continue
-                    if candidate.is_visible():
+        # Even the overview can contain preview cards and a sort button.
+        # Wait for the delayed review entry and select it before extracting.
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            for role in ("tab", "button"):
+                target = page.get_by_role(role, name=re.compile(r"口コミ|クチコミ|レビュー|reviews?", re.I))
+                for index in range(min(target.count(), 8)):
+                    if time.monotonic() >= deadline:
+                        break
+                    try:
+                        candidate = target.nth(index)
+                        if not candidate.is_visible():
+                            continue
+                        label = (candidate.get_attribute("aria-label") or "") + " " + candidate.inner_text()
+                        if re.search(r"書く|投稿|追加|write|add\s+(a\s+)?review|leave\s+(a\s+)?review", label, re.I):
+                            continue
                         candidate.click(timeout=3000)
-                        page.locator('[data-review-id]').first.wait_for(state="visible", timeout=10000)
+                        sort.wait_for(state="visible", timeout=8000)
+                        page.locator(REVIEW_CARD_SELECTOR).first.wait_for(state="visible", timeout=8000)
                         return
-                except Exception:
-                    continue
-    print("ブラウザーで対象店舗の「口コミ」を開いてください。並び順や絞り込みも画面で選べます。")
+                    except Exception:
+                        continue
+            page.wait_for_timeout(500)
+    body = page.locator("body").inner_text(timeout=3000)
+    restricted = bool(re.search(r"Google\s*マップの表示が制限|Google\s*Maps[^\n]{0,80}(restricted|limited)", body, re.I))
+    if restricted:
+        print("Googleマップで口コミの表示が制限されています。専用ブラウザーでログインや表示内容を確認してください。", flush=True)
+    print("専用ブラウザーで必要に応じてログインし、対象店舗の「口コミ」を開いてください。ログイン状態は次回も保持します。", flush=True)
     if not sys.stdin.isatty():
-        raise RuntimeError("口コミ一覧を自動で開けませんでした。ターミナルで--manualを指定して再実行してください。")
+        raise RuntimeError("Googleマップで口コミの表示が制限されています。ターミナルで--manualを指定して確認してください。" if restricted
+                           else "口コミ一覧を自動で開けませんでした。ターミナルで--manualを指定して再実行してください。")
     try:
         input("口コミが表示されたら、このターミナルでEnterを押してください: ")
     except EOFError as error:
         raise RuntimeError("手動操作にはターミナルが必要です。店舗URLを指定して再実行してください。") from error
-    page.locator('[data-review-id]').first.wait_for(state="visible", timeout=15000)
+    sort.wait_for(state="visible", timeout=15000)
+    page.locator(REVIEW_CARD_SELECTOR).first.wait_for(state="visible", timeout=15000)
 
 
 def expand_text(page, processed: set[str]):
@@ -281,6 +292,9 @@ def build_parser():
 
 def main(argv=None) -> int:
     from .console import dispatch
+    if sys.platform != "darwin":
+        print("このツールはMac専用です。macOSで実行してください。", file=sys.stderr)
+        return 1
     return dispatch(list(sys.argv[1:] if argv is None else argv), build_parser())
 
 
@@ -369,12 +383,8 @@ def run_collection(args) -> int:
         extractor = (ROOT / "extract_reviews.js").read_text(encoding="utf-8")
         context = None
         try:
-            with tempfile.TemporaryDirectory(prefix="maps-reviews-") as profile, sync_playwright() as pw:
+            with sync_playwright() as pw, collection_browser(pw, args.browser) as context:
                 try:
-                    launch = {"headless": False, "locale": "ja-JP", "viewport": {"width": 1280, "height": 900}}
-                    if args.browser == "chrome":
-                        launch["channel"] = "chrome"
-                    context = pw.chromium.launch_persistent_context(profile, **launch)
                     page = context.pages[0] if context.pages else context.new_page()
                     page.set_default_timeout(10000)
                     page.goto(args.url or "https://www.google.com/maps?hl=ja", wait_until="domcontentloaded", timeout=45000)
@@ -430,7 +440,6 @@ def run_collection(args) -> int:
                                     page.url + "\n" + page.locator("body").inner_text(timeout=3000), encoding="utf-8")
                             except Exception:
                                 pass
-                        context.close()
         except KeyboardInterrupt:
             metadata["stop_reason"] = "ユーザーが中断（取得済みデータを保存）"
         except Exception as error:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install the private-repository CLI into a user-owned virtual environment."""
+"""Install the public macOS CLI into a user-owned virtual environment."""
 from __future__ import annotations
 
 import argparse
@@ -14,6 +14,7 @@ import venv
 import zipfile
 from pathlib import Path
 from urllib.parse import quote
+from urllib.request import urlopen
 
 REPOSITORY = "atsuki-sakai/google-maps-reviews"
 
@@ -63,7 +64,7 @@ def install_with_pipx(source: Path, installation, browser: str):
     with tempfile.TemporaryDirectory(prefix=".pipx-source-", dir=base) as folder:
         staged = Path(folder) / "source"
         staged.mkdir()
-        for name in ("pyproject.toml", "README.md"):
+        for name in ("pyproject.toml", "README.md", "LICENSE"):
             shutil.copy2(source / name, staged / name)
         shutil.copytree(source / "src", staged / "src", ignore=shutil.ignore_patterns("__pycache__", "*.egg-info"))
         marker.write_text(json.dumps(identity, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -113,8 +114,9 @@ def check_destination(prefix: Path):
 
 def fetch_source(ref: str, folder: Path) -> Path:
     archive_path = folder / "source.zip"
-    with archive_path.open("wb") as stream:
-        subprocess.run(["gh", "api", f"repos/{REPOSITORY}/zipball/{quote(ref, safe='')}"], stdout=stream, check=True)
+    archive_url = f"https://codeload.github.com/{REPOSITORY}/zip/{quote(ref, safe='')}"
+    with urlopen(archive_url, timeout=60) as response, archive_path.open("wb") as stream:
+        shutil.copyfileobj(response, stream)
     unpacked = folder / "source"
     with zipfile.ZipFile(archive_path) as archive:
         for member in archive.infolist():
@@ -158,14 +160,14 @@ def install_from_source(source: Path, destination, browser: str):
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="利用者領域にCLIとブラウザーを準備します。sudoや認証トークンのコピーは使いません。")
     parser.add_argument("--prefix", type=Path, default=Path(os.environ.get("GOOGLE_MAPS_REVIEWS_PREFIX", "~/.local")), help="導入先（既定:~/.local、環境変数GOOGLE_MAPS_REVIEWS_PREFIXも使用可）")
-    parser.add_argument("--source", type=Path, help="ローカルリポジトリを使用。省略時は認証済みghでprivateリポジトリのアーカイブを取得")
+    parser.add_argument("--source", type=Path, help="ローカルリポジトリを使用。省略時は公開リポジトリから取得（GitHub認証不要）")
     parser.add_argument("--ref", default="main", help="取得するブランチまたはタグ（既定:main）")
     parser.add_argument("--browser", choices=("chrome", "chromium"), default="chrome", help="既存Chrome確認またはChromiumダウンロード（既定:chrome）")
     args = parser.parse_args(argv)
     if sys.version_info < (3, 10):
         parser.error("Python 3.10以降が必要です。")
-    if os.name == "nt":
-        parser.error("このセットアップスクリプトはmacOS/Linux用です。Windowsではpipxなどでパッケージを導入してください。")
+    if sys.platform != "darwin":
+        parser.error("このツールはMac専用です。macOSで実行してください。")
     try:
         prefix = args.prefix.expanduser().resolve()
         pipx_installation = find_pipx_installation(prefix)
@@ -178,8 +180,6 @@ def main(argv=None) -> int:
         if args.source:
             install(args.source.expanduser().resolve())
         else:
-            if not shutil.which("gh"):
-                raise RuntimeError("GitHub CLI (gh)が必要です。gh auth loginでアクセス権のあるアカウントを認証するか--sourceを指定してください。")
             with tempfile.TemporaryDirectory(prefix="google-maps-reviews-source-") as folder:
                 source = fetch_source(args.ref, Path(folder))
                 install(source)

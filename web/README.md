@@ -1,19 +1,17 @@
-# Review Port
+# CLIの説明ページ
 
-公開URL：[Review Port](https://google-maps-reviews.vercel.app/)
+Mac専用の `google-maps-reviews` CLIのセットアップ、実行コマンド、保存先を説明するページです。URL入力、口コミ収集、CSVダウンロードの機能はありません。CLI利用者はこのページを起動する必要がありません。
 
-Googleマップの店舗URLから口コミを収集し、CSVに保存するNext.js + shadcn/uiの画面です。セットアップ、制限、Vercel自動更新の設定は[リポジトリのREADME](../README.md)を参照してください。
+Node.js 22で開発します。
 
 ```bash
 npm ci
 npm run dev
-```
-
-「このMacで収集する」はこのMacの専用Chromeを使います。初回は収集サービスを起動し、公開サイトからのローカルネットワーク接続を許可してください。未接続時は接続方法を表示し、Vercel側へ自動で切り替えません。「オンラインで収集を試す」を明示的に押した場合のみVercel上のChromiumを使います。画面の公開と実店舗の全件収集は別に確認します。
-
-```bash
 npm run lint
 npm test
 npm run build
-npm run test:browser
 ```
+
+GitHubのmain更新をVercelのGit Integrationで自動反映します。GitHub Actionsは使用しません。Root Directoryは `web` です。
+
+`/api/collect` は旧クライアント向けに410を返し、収集を実行しません。`scripts/local-collector.ts` と対応するライブラリーは旧版CLIのMac収集サービスとの互換性を保つために残しています。新規のCLIセットアップにはNode.jsもこのサービスも不要です。

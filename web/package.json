@@ -10,7 +10,7 @@
     "sync": "node scripts/sync-extractor.mjs",
     "prebuild": "npm run sync",
     "predev": "npm run sync",
-    "test": "tsx --test tests/reviews.test.ts tests/local-collector.test.ts tests/collection-transport.test.ts",
+    "test": "tsx --test tests/reviews.test.ts tests/local-collector.test.ts",
     "collector": "tsx scripts/local-collector.ts",
     "collector:install": "node scripts/install-local-collector.mjs install",
     "collector:stop": "node scripts/install-local-collector.mjs stop",

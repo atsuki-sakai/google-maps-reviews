@@ -1,9 +1,8 @@
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
 import test, { type TestContext } from 'node:test';
 import { chromium, type Browser, type Page } from 'playwright-core';
 import { POST } from '../src/app/api/collect/route';
-import { collectReviews } from '../src/lib/collector';
+import { collectReviews, PublicCollectionError } from '../src/lib/collector';
 import { isFullCoverage, mergeReviews, toCsv, validateMapsUrl, type CollectionEvent, type Review } from '../src/lib/reviews';
 const row: Review = { review_id: 'review-1', author: '投稿者', rating: 5, date_text: '2 年前', text: '全文\n2行目', owner_reply: '', author_url: '', text_may_be_truncated: false };
 
@@ -28,10 +27,6 @@ test('CSVは日本語、改行、引用符を保持し、数式を文字列に�
   assert.ok(csv.startsWith('\uFEFF')); assert.ok(csv.includes('"\'=1+1"'));
   assert.ok(csv.includes('"日本語, ""引用""\n2行目"')); assert.ok(csv.includes('テスト店舗'));
 });
-
-function collectRequest(body = JSON.stringify({ url: 'https://www.google.com/maps/test' })) {
-  return new Request('http://localhost/api/collect', { method: 'POST', body });
-}
 
 function mockCollectionPage(t: TestContext, options: {
   body?: string;
@@ -143,43 +138,26 @@ test('総件数が不明または未達の場合は追加読み込みを続け�
   }
 });
 
-test('CDPの接続秘密とPlaywrightの生例外をSSEに公開しない', async (t) => {
-  const paths: string[] = [];
-  const server = createServer((request, response) => {
-    paths.push(request.url || '');
-    response.writeHead(401);
-    response.end('Unauthorized');
-  });
-  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
-  t.after(() => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())));
-  const address = server.address();
-  assert.ok(address && typeof address !== 'string');
-  const previous = process.env.BROWSER_CDP_URL;
-  process.env.BROWSER_CDP_URL = `http://127.0.0.1:${address.port}?token=DUMMY_REVIEW_SECRET`;
-  t.after(() => {
-    if (previous === undefined) delete process.env.BROWSER_CDP_URL;
-    else process.env.BROWSER_CDP_URL = previous;
-  });
-  const response = await POST(collectRequest());
-  const output = await response.text();
-  assert.equal(response.status, 200);
-  assert.ok(paths.some(path => path.includes('token=DUMMY_REVIEW_SECRET')));
-  assert.doesNotMatch(output, /DUMMY_REVIEW_SECRET|token=|connectOverCDP|127\.0\.0\.1/);
-  const events = output.trim().split('\n\n').map(line => JSON.parse(line.slice('data: '.length)));
-  assert.deepEqual(events.at(-1), { type: 'error', message: '口コミの収集に失敗しました。時間をおいて再度お試しください。' });
+test('旧Web APIは収集を始めずCLIへの案内を返す', async (t) => {
+  const connect = t.mock.method(chromium, 'connectOverCDP', async () => { throw new Error('ブラウザーを起動しました'); });
+  const response = await POST();
+  assert.equal(response.status, 410);
+  assert.deepEqual(await response.json(), { error: '口コミの収集はMac専用CLIから実行してください。' });
+  assert.equal(connect.mock.callCount(), 0);
 });
 
-test('Googleの表示制限と口コミURL確認の案内はSSEに残す', async (t) => {
+test('ローカル収集ではGoogleの表示制限と口コミURL確認を案内する', async (t) => {
   for (const [body, message] of [
     ['Google マップの表示が制限されています。もっと見る', 'Googleマップで口コミの表示が制限されています。専用ブラウザーで表示内容を確認し、必要に応じてログインしてください。ログインしても取得できない場合があります。'],
     ['ログイン', '口コミ一覧が見つかりません。店舗ページの共有URLを確認してください。'],
   ]) {
     await t.test(body, async (fixture) => {
       const page = mockCollectionPage(fixture, { body });
-      const output = await (await POST(collectRequest())).text();
-      assert.doesNotMatch(output, /DUMMY_REVIEW_SECRET/);
-      const events = output.trim().split('\n\n').map(line => JSON.parse(line.slice('data: '.length)));
-      assert.deepEqual(events.at(-1), { type: 'error', message });
+      await assert.rejects(collectReviews('https://www.google.com/maps/test', () => {}, new AbortController().signal), error => {
+        assert.ok(error instanceof PublicCollectionError);
+        assert.equal(error.message, message);
+        return true;
+      });
       assert.deepEqual(page.closed, ['collection-page', 'disconnect']);
       if (body === 'ログイン') assert.equal(page.elapsed(), 30000);
     });
@@ -214,20 +192,6 @@ test('CDP接続待ち中の中止後はページを開かずに接続を閉じ�
   assert.equal(contextCreated, 0);
   assert.equal(closed, 1);
   assert.deepEqual(events, ['status']);
-});
-
-test('JSON読み取り例外は安全なURL案内にし、URL検証の案内を保持する', async () => {
-  const malformed = await POST(collectRequest('DUMMY_REVIEW_SECRET'));
-  assert.equal(malformed.status, 400);
-  assert.deepEqual(await malformed.json(), { error: 'URLを確認してください。' });
-  for (const [url, error] of [
-    ['not-a-url', 'Googleマップの店舗URLを貼り付けてください。'],
-    ['https://example.com/maps', 'GoogleマップのHTTPS店舗URLを指定してください。'],
-  ]) {
-    const response = await POST(collectRequest(JSON.stringify({ url })));
-    assert.equal(response.status, 400);
-    assert.deepEqual(await response.json(), { error });
-  }
 });
 
 test('遅れて現れる口コミタブを待ち、概要の少数口コミから一覧を開く', async (t) => {
