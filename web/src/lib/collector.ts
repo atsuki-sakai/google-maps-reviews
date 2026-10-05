@@ -14,9 +14,10 @@ async function checkMapsRestriction(page: Page) {
     throw new PublicCollectionError('Googleマップで口コミの表示が制限されています。専用ブラウザーで表示内容を確認し、必要に応じてログインしてください。ログインしても取得できない場合があります。');
 }
 
-async function prepareReviews(page: Page, isCancelled: () => boolean) {
+export async function prepareReviews(page: Page, isCancelled: () => boolean) {
   const deadline = Date.now() + 30000;
   const cards = page.locator(cardsSelector);
+  const sort = page.getByRole('button', { name: /並べ替え|sort/i }).first();
   while (!isCancelled() && Date.now() < deadline) {
     for (const role of ['tab', 'button'] as const) {
       const candidates = page.getByRole(role, { name: /クチコミ|口コミ|レビュー|reviews?/i });
@@ -30,8 +31,10 @@ async function prepareReviews(page: Page, isCancelled: () => boolean) {
           if (/書く|投稿|追加|write|add\s+(a\s+)?review|leave\s+(a\s+)?review/i.test(label)) continue;
           if (isCancelled()) return;
           await candidate.click({ timeout: Math.min(3000, Math.max(1, deadline - Date.now())) });
-          await page.waitForTimeout(500);
-          await cards.first().waitFor({ state: 'visible', timeout: Math.max(1, deadline - Date.now()) });
+          // The overview also contains preview review cards. Wait for the full
+          // review panel's visible sort control before accepting those cards.
+          await sort.waitFor({ state: 'visible', timeout: Math.min(8000, Math.max(1, deadline - Date.now())) });
+          await cards.first().waitFor({ state: 'visible', timeout: Math.min(8000, Math.max(1, deadline - Date.now())) });
           return;
         } catch { /* Another visible review entry may still become available. */ }
       }
@@ -39,7 +42,7 @@ async function prepareReviews(page: Page, isCancelled: () => boolean) {
     if (!await cards.count()) await checkMapsRestriction(page);
     await page.waitForTimeout(Math.min(500, Math.max(0, deadline - Date.now())));
   }
-  if (isCancelled() || await cards.count()) return;
+  if (isCancelled() || (await sort.isVisible() && await cards.count())) return;
   await checkMapsRestriction(page);
   throw new PublicCollectionError('口コミ一覧が見つかりません。店舗ページの共有URLを確認してください。');
 }

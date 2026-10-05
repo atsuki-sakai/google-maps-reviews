@@ -3,6 +3,7 @@ import test from 'node:test';
 import { chromium } from 'playwright-core';
 import type { Review } from '../src/lib/reviews';
 import { extractorSource } from '../src/lib/extractor';
+import { prepareReviews } from '../src/lib/collector';
 
 test('実ブラウザーのDOMから通常形式と宿泊施設形式を読み取る', async () => {
   const browser = await chromium.launch({ channel: 'chrome', headless: true });
@@ -19,5 +20,21 @@ test('実ブラウザーのDOMから通常形式と宿泊施設形式を読み�
     assert.equal(data.reviews[1].author_url, 'https://www.google.com/maps/contrib/123/reviews');
     assert.equal(data.reviews[2].text, '');
     assert.equal(data.displayed_total, 3);
+  } finally { await browser.close(); }
+});
+
+test('一覧への切り替え中に残るプレビュー3件を全件一覧として扱わない', async () => {
+  const browser = await chromium.launch({ channel: 'chrome', headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(`<button role="tab" id="reviews">クチコミ</button>
+      <section id="cards">${Array.from({ length: 3 }, (_, i) => `<div data-review-id="preview-${i}">概要の口コミ</div>`).join('')}</section>
+      <script>document.getElementById('reviews').onclick=()=>setTimeout(()=>{
+        document.getElementById('cards').innerHTML='<button>並べ替え</button>'+
+          Array.from({length:30},(_,i)=>'<div data-review-id="review-'+i+'">一覧の口コミ</div>').join('');
+      },1500)</script>`);
+    await prepareReviews(page, () => false);
+    assert.equal(await page.getByRole('button', { name: '並べ替え' }).isVisible(), true);
+    assert.equal(await page.locator('[data-review-id]').count(), 30);
   } finally { await browser.close(); }
 });

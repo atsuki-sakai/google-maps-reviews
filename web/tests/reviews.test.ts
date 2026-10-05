@@ -66,8 +66,16 @@ function mockCollectionPage(t: TestContext, options: {
   const page = {
     setDefaultTimeout() {},
     async goto() {},
-    getByRole: (role: string) => {
+    getByRole: (role: string, optionsForRole?: { name?: RegExp }) => {
       if (role === 'main') return { first: () => ({ async waitFor() {} }) };
+      if (role === 'button' && optionsForRole?.name?.test('並べ替え')) {
+        return { first: () => ({
+          async isVisible() { return opened; },
+          async waitFor({ timeout }: { timeout: number }) {
+            if (!opened) { now += timeout; throw new Error('Review panel not open'); }
+          },
+        }) };
+      }
       const entries = (options.entries || []).filter(entry => entry.role === role && (entry.availableAt || 0) <= now);
       return {
         async count() { return entries.length; },
