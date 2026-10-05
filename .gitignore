@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.codebase-memory/
+.DS_Store
+.env
+.env.*
+*.csv
+*.xlsx
+*.json
+*.png
+収集エラー_*.txt

@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=77.0.3"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "google-maps-reviews"
+version = "0.1.0"
+description = "Googleマップの表示された口コミを収集してCSV・Excel・JSONに保存するCLI"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["playwright>=1.49,<2", "openpyxl>=3.1,<4"]
+
+[project.scripts]
+google-maps-reviews = "google_maps_reviews.cli:main"
+
+[project.urls]
+Repository = "https://github.com/atsuki-sakai/google-maps-reviews"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+google_maps_reviews = ["extract_reviews.js"]
