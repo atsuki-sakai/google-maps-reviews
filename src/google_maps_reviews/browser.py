@@ -2,9 +2,14 @@
 from __future__ import annotations
 
 import fcntl
+import json
+import os
+import signal
 import subprocess
+import threading
 import time
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 
 
@@ -21,14 +26,56 @@ def browser_executable(pw, browser: str) -> Path:
 
 
 @contextmanager
-def collection_browser(pw, browser: str):
-    profile = Path.home() / "Library" / "Application Support" / "google-maps-reviews" / browser
-    profile.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with (profile / ".collector.lock").open("a") as lock:
+def profile_lock(profile: Path):
+    # Keep the same inode: unlinking a held lock allows two collectors to run.
+    with (profile / ".collector.lock").open("a+") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            raise RuntimeError("この専用ブラウザーでは収集中です。完了してから再実行してください。") from None
+            lock.seek(0)
+            try:
+                owner = json.loads(lock.read(4096))
+                pid = owner.get("pid") if isinstance(owner, dict) else None
+            except (ValueError, OSError):
+                pid = None
+            detail = f"（実行元PID: {pid}）" if type(pid) is int and pid > 0 else ""
+            raise RuntimeError(f"専用ブラウザーは別の処理が使用中です{detail}。収集または手動操作の待機が終わってから再実行してください。") from None
+        lock.seek(0)
+        lock.truncate()
+        json.dump({"pid": os.getpid(), "started_at": datetime.now().astimezone().isoformat(timespec="seconds")}, lock)
+        lock.flush()
+        try:
+            yield
+        finally:
+            lock.seek(0)
+            lock.truncate()
+            lock.flush()
+
+
+@contextmanager
+def interrupt_on_termination():
+    # SIGTERM normally skips Python finally blocks and leaves Chrome running.
+    # Unwind the owned browser and lock, then exit the entire workflow. A
+    # KeyboardInterrupt is caught by collection and could start report analysis
+    # after the user requested termination.
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous = signal.getsignal(signal.SIGTERM)
+    def terminate(_signum, _frame):
+        raise SystemExit(128 + signal.SIGTERM)
+    signal.signal(signal.SIGTERM, terminate)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+@contextmanager
+def collection_browser(pw, browser: str):
+    profile = Path.home() / "Library" / "Application Support" / "google-maps-reviews" / browser
+    profile.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with interrupt_on_termination(), profile_lock(profile):
         port_file = profile / "DevToolsActivePort"
         port_file.unlink(missing_ok=True)
         process = None

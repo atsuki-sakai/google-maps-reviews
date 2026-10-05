@@ -18,6 +18,11 @@ from google_maps_reviews import cli, console
 
 
 class InstalledCliTest(unittest.TestCase):
+    def setUp(self):
+        guard = patch.object(cli, "collection_browser", side_effect=AssertionError("単体テストから実ブラウザーを起動しません。ブラウザーを明示的にモックしてください。"))
+        self.browser_guard = guard.start()
+        self.addCleanup(guard.stop)
+
     def test_place_identity_accepts_url_variants_and_rejects_a_different_place(self):
         original = "https://www.google.com/maps/place/Store/data=!1s0x123:0x456!9m1!1b1?hl=ja"
         variant = "https://www.google.com/maps/place/Store/data=%211s0x123%3A0x456!8m2!3d0!4d0?hl=en"
@@ -245,6 +250,28 @@ class InstalledCliTest(unittest.TestCase):
 
 
 class LocalServiceCliTest(unittest.TestCase):
+    def setUp(self):
+        guard = patch.object(cli, "collection_browser", side_effect=AssertionError("単体テストから実ブラウザーを起動しません。ブラウザーを明示的にモックしてください。"))
+        self.browser_guard = guard.start()
+        self.addCleanup(guard.stop)
+
+    def test_missing_service_opt_in_fails_without_launching_real_chrome(self):
+        with tempfile.TemporaryDirectory() as folder, patch.object(cli, "build_opener") as opener, \
+                patch("playwright.sync_api.sync_playwright"), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            self.assertEqual(cli.main(["https://www.google.com/maps/test", "--all", "--output-dir", folder]), 1)
+            self.browser_guard.assert_called_once()
+            opener.assert_not_called()
+            self.assertEqual(list(Path(folder).iterdir()), [])
+
+    def test_termination_exits_the_caller_instead_of_continuing_with_partial_data(self):
+        with tempfile.TemporaryDirectory() as folder, patch("playwright.sync_api.sync_playwright"), \
+                patch.object(cli, "collection_browser", side_effect=SystemExit(143)), \
+                patch.object(cli, "export_reviews") as exporting:
+            with self.assertRaises(SystemExit) as result:
+                cli.main(["https://www.google.com/maps/test", "--all", "--output-dir", folder])
+            self.assertEqual(result.exception.code, 143)
+            exporting.assert_not_called()
+
     def payload(self, count, total=2):
         return {"place": "検証店舗", "sourceUrl": "https://www.google.com/maps/test", "displayedTotal": total,
                 "reviews": [{"review_id": f"id-{index}", "author": f"投稿者{index}", "rating": 5,

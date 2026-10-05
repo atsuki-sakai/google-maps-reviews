@@ -211,19 +211,19 @@ google-maps-reviews setup --browser chrome
 
 専用ブラウザーのデータは `~/Library/Application Support/google-maps-reviews/chrome/` または `chromium/` に保存します。普段使っているChromeのプロファイルは使用しません。同じ専用ブラウザーで同時に複数の収集を実行しないでください。
 
-旧版のMac収集サービスを導入済みの場合、既定の `URL --all` はその専用Chromeを引き続き使います。新規導入ではサービスのセットアップは不要です。
+終了時には起動した専用Chromeを閉じ、OSのロックを解放します。0.5.1以降は終了要求（SIGTERM）でも同じ後片付けを行います。使用中の場合は実行元PIDを表示するので、その処理が収集または手動操作を待っていないか確認してください。ロックファイルを削除すると同時実行を防げなくなるため、削除しないでください。
 
 ## 更新
 
 セットアップと同じ1コマンドを再実行すると最新のmainへ更新できます。設定と出力ファイルは保持します。既存のpipx版も所有情報を確認して更新します。別ツールのコマンドは上書きしません。
 
-バージョンを固定する場合は、セットアップに `--ref v0.5.0` を付けます。
+バージョンを固定する場合は、セットアップに `--ref v0.5.1` を付けます。
 
 ### pipxから導入する場合
 
 ```bash
 brew install pipx
-pipx install 'git+https://github.com/atsuki-sakai/google-maps-reviews.git@v0.5.0'
+pipx install 'git+https://github.com/atsuki-sakai/google-maps-reviews.git@v0.5.1'
 pipx ensurepath
 google-maps-reviews setup --browser chrome
 ```
