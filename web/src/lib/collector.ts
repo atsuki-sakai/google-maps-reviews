@@ -1,4 +1,4 @@
-import { chromium as playwright, type Browser } from 'playwright-core';
+import { chromium as playwright, type Browser, type Page } from 'playwright-core';
 import chromium from '@sparticuz/chromium';
 import { extractorSource } from './extractor';
 import { isFullCoverage, mergeReviews, type Collection, type CollectionEvent, type Review } from './reviews';
@@ -8,42 +8,80 @@ type Extracted = { place_name: string; source_url: string; displayed_total: numb
 
 export class PublicCollectionError extends Error {}
 
+async function checkMapsRestriction(page: Page) {
+  const body = await page.locator('body').innerText({ timeout: 1000 }).catch(() => '');
+  if (/captcha|通常と異なるトラフィック|unusual traffic|Google\s*マップの表示が制限|Google\s*Maps[^\n]{0,80}(restricted|limited)/i.test(body))
+    throw new PublicCollectionError('Googleマップで口コミの表示が制限されています。専用ブラウザーで表示内容を確認し、必要に応じてログインしてください。ログインしても取得できない場合があります。');
+}
+
+async function prepareReviews(page: Page, isCancelled: () => boolean) {
+  const deadline = Date.now() + 30000;
+  const cards = page.locator(cardsSelector);
+  while (!isCancelled() && Date.now() < deadline) {
+    for (const role of ['tab', 'button'] as const) {
+      const candidates = page.getByRole(role, { name: /クチコミ|口コミ|レビュー|reviews?/i });
+      for (let i = 0; i < Math.min(await candidates.count(), 8) && Date.now() < deadline; i++) {
+        if (isCancelled()) return;
+        const candidate = candidates.nth(i);
+        try {
+          if (!await candidate.isVisible()) continue;
+          const label = (await candidate.getAttribute('aria-label', { timeout: 500 }) || '')
+            + ' ' + await candidate.innerText({ timeout: 500 });
+          if (/書く|投稿|追加|write|add\s+(a\s+)?review|leave\s+(a\s+)?review/i.test(label)) continue;
+          if (isCancelled()) return;
+          await candidate.click({ timeout: Math.min(3000, Math.max(1, deadline - Date.now())) });
+          await page.waitForTimeout(500);
+          await cards.first().waitFor({ state: 'visible', timeout: Math.max(1, deadline - Date.now()) });
+          return;
+        } catch { /* Another visible review entry may still become available. */ }
+      }
+    }
+    if (!await cards.count()) await checkMapsRestriction(page);
+    await page.waitForTimeout(Math.min(500, Math.max(0, deadline - Date.now())));
+  }
+  if (isCancelled() || await cards.count()) return;
+  await checkMapsRestriction(page);
+  throw new PublicCollectionError('口コミ一覧が見つかりません。店舗ページの共有URLを確認してください。');
+}
+
 export async function collectReviews(url: string, emit: (event: CollectionEvent) => void, signal: AbortSignal) {
   let browser: Browser | undefined;
+  let ownedPage: Page | undefined;
+  let closingPage: Promise<void> | undefined;
+  const closeOwnedPage = () => {
+    if (ownedPage && !closingPage) closingPage = ownedPage.close().catch(() => {});
+    return closingPage;
+  };
+  const cdpUrl = process.env.BROWSER_CDP_URL;
   const rows = new Map<string, Review>();
   let result: Collection = { place: '', sourceUrl: url, displayedTotal: null, reviews: [], verified: false, reason: '' };
   const started = Date.now();
   let cancelled = signal.aborted;
-  const abort = () => { cancelled = true; void browser?.close(); };
+  const abort = () => { cancelled = true; void closeOwnedPage(); };
   signal.addEventListener('abort', abort, { once: true });
   try {
     if (cancelled) throw new PublicCollectionError('収集を中止しました。');
     emit({ type: 'status', message: 'Googleマップの店舗ページを開いています。' });
-    if (process.env.BROWSER_CDP_URL) {
-      browser = await playwright.connectOverCDP(process.env.BROWSER_CDP_URL, { timeout: 25000 });
+    if (cdpUrl) {
+      browser = await playwright.connectOverCDP(cdpUrl, { timeout: 25000 });
     } else if (process.platform === 'linux') {
       browser = await playwright.launch({ executablePath: await chromium.executablePath(), args: chromium.args });
     } else {
       browser = await playwright.launch({ channel: 'chrome', headless: true });
     }
     if (cancelled) return;
-    const context = (process.env.BROWSER_CDP_URL && browser.contexts()[0])
+    const context = (cdpUrl && browser.contexts()[0])
       || await browser.newContext({ locale: 'ja-JP', viewport: { width: 1280, height: 900 } });
-    const page = await context.newPage();
+    if (cancelled) return;
+    ownedPage = await context.newPage();
+    if (cancelled) return;
+    const page = ownedPage;
     page.setDefaultTimeout(8000);
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
-    await page.getByRole('main').first().waitFor({ state: 'visible', timeout: 30000 });
-    if (!await page.locator(cardsSelector).count()) {
-      const tab = page.getByRole('tab', { name: /クチコミ|口コミ|reviews/i }).first();
-      if (await tab.count()) await tab.click();
-    }
-    try { await page.locator(cardsSelector).first().waitFor({ state: 'visible', timeout: 15000 }); }
-    catch {
-      const body = await page.locator('body').innerText();
-      if (/captcha|通常と異なるトラフィック|unusual traffic|表示が制限|ログイン/i.test(body))
-        throw new PublicCollectionError('Googleがこの収集用ブラウザーでの口コミ表示を制限しています。ログイン済みの収集環境が必要です。MacのCLIではログイン後に収集できます。');
-      throw new PublicCollectionError('口コミ一覧が見つかりません。店舗ページの共有URLを確認してください。');
-    }
+    try { await page.getByRole('main').first().waitFor({ state: 'visible', timeout: 30000 }); }
+    catch (error) { await checkMapsRestriction(page); throw error; }
+    await prepareReviews(page, () => cancelled);
+    if (cancelled) return;
     emit({ type: 'status', message: '口コミを読み込み、本文の省略を展開しています。' });
     const expanded = new Set<string>();
     let stalled = 0;
@@ -92,6 +130,7 @@ export async function collectReviews(url: string, emit: (event: CollectionEvent)
     else throw error;
   } finally {
     signal.removeEventListener('abort', abort);
+    await closeOwnedPage();
     await browser?.close().catch(() => {});
   }
 }

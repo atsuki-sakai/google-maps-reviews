@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import test from 'node:test';
-import { chromium, type Browser } from 'playwright-core';
+import test, { type TestContext } from 'node:test';
+import { chromium, type Browser, type Page } from 'playwright-core';
 import { POST } from '../src/app/api/collect/route';
 import { collectReviews } from '../src/lib/collector';
-import { isFullCoverage, mergeReviews, toCsv, validateMapsUrl, type Review } from '../src/lib/reviews';
+import { isFullCoverage, mergeReviews, toCsv, validateMapsUrl, type CollectionEvent, type Review } from '../src/lib/reviews';
 const row: Review = { review_id: 'review-1', author: '投稿者', rating: 5, date_text: '2 年前', text: '全文\n2行目', owner_reply: '', author_url: '', text_may_be_truncated: false };
 
 test('Googleマップ以外と認証情報を含むURLは拒否する', () => {
@@ -31,6 +31,70 @@ test('CSVは日本語、改行、引用符を保持し、数式を文字列に�
 
 function collectRequest(body = JSON.stringify({ url: 'https://www.google.com/maps/test' })) {
   return new Request('http://localhost/api/collect', { method: 'POST', body });
+}
+
+function mockCollectionPage(t: TestContext, options: {
+  body?: string;
+  entries?: { role: 'tab' | 'button'; label: string; availableAt?: number; visible?: boolean }[];
+  overviewCount?: number;
+  reviews?: Review[];
+}) {
+  let now = 0;
+  let opened = false;
+  const clicked: string[] = [];
+  const closed: string[] = [];
+  const reviews = options.reviews || [row];
+  t.mock.method(Date, 'now', () => now);
+  const previous = process.env.BROWSER_CDP_URL;
+  process.env.BROWSER_CDP_URL = 'http://browser.invalid';
+  t.after(() => {
+    if (previous === undefined) delete process.env.BROWSER_CDP_URL;
+    else process.env.BROWSER_CDP_URL = previous;
+  });
+  const cardCount = () => opened ? reviews.length : options.overviewCount || 0;
+  const cards = {
+    async count() { return cardCount(); },
+    first: () => ({
+      async waitFor() { if (!cardCount()) throw new Error('DUMMY_REVIEW_SECRET'); },
+      async evaluate() { return { total: 100, atEnd: true, x: 10, y: 10 }; },
+    }),
+    nth: (index: number) => ({
+      async getAttribute() { return reviews[index % reviews.length].review_id; },
+      getByRole: () => ({ async count() { return 0; } }),
+    }),
+  };
+  const page = {
+    setDefaultTimeout() {},
+    async goto() {},
+    getByRole: (role: string) => {
+      if (role === 'main') return { first: () => ({ async waitFor() {} }) };
+      const entries = (options.entries || []).filter(entry => entry.role === role && (entry.availableAt || 0) <= now);
+      return {
+        async count() { return entries.length; },
+        nth: (index: number) => ({
+          async isVisible() { return entries[index].visible !== false; },
+          async getAttribute() { return entries[index].label; },
+          async innerText() { return entries[index].label; },
+          async click() { clicked.push(entries[index].label); opened = true; },
+        }),
+      };
+    },
+    locator: (selector: string) => selector === 'body'
+      ? { async innerText() { return options.body || ''; } } : cards,
+    async evaluate() { return { place_name: 'テスト店舗', source_url: 'https://www.google.com/maps/test', displayed_total: reviews.length, reviews }; },
+    mouse: { async move() {}, async wheel() {} },
+    async waitForTimeout(ms: number) { now += ms; },
+    async close() { closed.push('collection-page'); },
+  } as unknown as Page;
+  const loginPage = { async close() { closed.push('login-page'); } };
+  const context = {
+    async newPage() { return page; },
+    pages: () => [loginPage, page],
+    async close() { closed.push('default-context'); },
+  };
+  const browser = { contexts: () => [context], async close() { closed.push('disconnect'); } } as unknown as Browser;
+  t.mock.method(chromium, 'connectOverCDP', async () => browser);
+  return { page, clicked, closed, elapsed: () => now };
 }
 
 test('CDPの接続秘密とPlaywrightの生例外をSSEに公開しない', async (t) => {
@@ -60,31 +124,19 @@ test('CDPの接続秘密とPlaywrightの生例外をSSEに公開しない', asyn
 });
 
 test('Googleの表示制限と口コミURL確認の案内はSSEに残す', async (t) => {
-  const previous = process.env.BROWSER_CDP_URL;
-  process.env.BROWSER_CDP_URL = 'http://browser.invalid';
-  t.after(() => {
-    if (previous === undefined) delete process.env.BROWSER_CDP_URL;
-    else process.env.BROWSER_CDP_URL = previous;
-  });
   for (const [body, message] of [
-    ['unusual traffic', 'Googleがこの収集用ブラウザーでの口コミ表示を制限しています。ログイン済みの収集環境が必要です。MacのCLIではログイン後に収集できます。'],
-    ['', '口コミ一覧が見つかりません。店舗ページの共有URLを確認してください。'],
+    ['Google マップの表示が制限されています。もっと見る', 'Googleマップで口コミの表示が制限されています。専用ブラウザーで表示内容を確認し、必要に応じてログインしてください。ログインしても取得できない場合があります。'],
+    ['ログイン', '口コミ一覧が見つかりません。店舗ページの共有URLを確認してください。'],
   ]) {
-    const page = {
-      setDefaultTimeout() {},
-      async goto() {},
-      getByRole: () => ({ first: () => ({ async waitFor() {}, async count() { return 0; } }) }),
-      locator: (selector: string) => selector === 'body'
-        ? { async innerText() { return body; } }
-        : { async count() { return 0; }, first: () => ({ async waitFor() { throw new Error('DUMMY_REVIEW_SECRET'); } }) },
-    };
-    const browser = { contexts: () => [{ async newPage() { return page; } }], async close() {} } as unknown as Browser;
-    const connection = t.mock.method(chromium, 'connectOverCDP', async () => browser);
-    const output = await (await POST(collectRequest())).text();
-    connection.mock.restore();
-    assert.doesNotMatch(output, /DUMMY_REVIEW_SECRET/);
-    const events = output.trim().split('\n\n').map(line => JSON.parse(line.slice('data: '.length)));
-    assert.deepEqual(events.at(-1), { type: 'error', message });
+    await t.test(body, async (fixture) => {
+      const page = mockCollectionPage(fixture, { body });
+      const output = await (await POST(collectRequest())).text();
+      assert.doesNotMatch(output, /DUMMY_REVIEW_SECRET/);
+      const events = output.trim().split('\n\n').map(line => JSON.parse(line.slice('data: '.length)));
+      assert.deepEqual(events.at(-1), { type: 'error', message });
+      assert.deepEqual(page.closed, ['collection-page', 'disconnect']);
+      if (body === 'ログイン') assert.equal(page.elapsed(), 30000);
+    });
   }
 });
 
@@ -130,4 +182,107 @@ test('JSON読み取り例外は安全なURL案内にし、URL検証の案内を�
     assert.equal(response.status, 400);
     assert.deepEqual(await response.json(), { error });
   }
+});
+
+test('遅れて現れる口コミタブを待ち、概要の少数口コミから一覧を開く', async (t) => {
+  const fixture = mockCollectionPage(t, {
+    overviewCount: 3,
+    entries: [{ role: 'tab', label: 'クチコミ', availableAt: 2000 }],
+  });
+  const events: CollectionEvent[] = [];
+  await collectReviews('https://www.google.com/maps/test', event => events.push(event), new AbortController().signal);
+  assert.deepEqual(fixture.clicked, ['クチコミ']);
+  assert.equal(events.at(-1)?.type, 'done');
+  assert.deepEqual(fixture.closed, ['collection-page', 'disconnect']);
+});
+
+test('投稿ボタンと非表示タブを除外し、遅れて現れる口コミ件数ボタンを開く', async (t) => {
+  const fixture = mockCollectionPage(t, {
+    body: 'ログイン',
+    entries: [
+      { role: 'tab', label: 'Reviews', visible: false },
+      { role: 'button', label: 'クチコミを書く' },
+      { role: 'button', label: 'Write a review' },
+      { role: 'button', label: '331 件のクチコミ', availableAt: 1500 },
+    ],
+  });
+  const events: CollectionEvent[] = [];
+  await collectReviews('https://www.google.com/maps/test', event => events.push(event), new AbortController().signal);
+  assert.deepEqual(fixture.clicked, ['331 件のクチコミ']);
+  assert.equal(events.at(-1)?.type, 'done');
+  assert.deepEqual(fixture.closed, ['collection-page', 'disconnect']);
+});
+
+test('CDPのnewPage待ち中の取消でも専用ページだけ閉じてから切断する', async (t) => {
+  const previous = process.env.BROWSER_CDP_URL;
+  process.env.BROWSER_CDP_URL = 'http://browser.invalid';
+  t.after(() => {
+    if (previous === undefined) delete process.env.BROWSER_CDP_URL;
+    else process.env.BROWSER_CDP_URL = previous;
+  });
+  const closed: string[] = [];
+  let navigated = 0;
+  let resolvePage!: (page: Page) => void;
+  let notifyNewPage!: () => void;
+  const newPageStarted = new Promise<void>(resolve => { notifyNewPage = resolve; });
+  const newPage = new Promise<Page>(resolve => { resolvePage = resolve; });
+  const page = { async goto() { navigated++; }, async close() { closed.push('collection-page'); } } as unknown as Page;
+  const context = {
+    newPage() { notifyNewPage(); return newPage; },
+    async close() { closed.push('default-context'); },
+  };
+  const browser = { contexts: () => [context], async close() { closed.push('disconnect'); } } as unknown as Browser;
+  t.mock.method(chromium, 'connectOverCDP', async () => browser);
+  const abort = new AbortController();
+  const collecting = collectReviews('https://www.google.com/maps/test', () => {}, abort.signal);
+  await newPageStarted;
+  abort.abort();
+  resolvePage(page);
+  await collecting;
+  assert.equal(navigated, 0);
+  assert.deepEqual(closed, ['collection-page', 'disconnect']);
+});
+
+test('実行中の取消では専用ページのclose完了を待ってからCDPを切断する', async (t) => {
+  const fixture = mockCollectionPage(t, {});
+  let notifyNavigation!: () => void;
+  let rejectNavigation!: (error: Error) => void;
+  let finishClose!: () => void;
+  const navigationStarted = new Promise<void>(resolve => { notifyNavigation = resolve; });
+  const pageClosed = new Promise<void>(resolve => { finishClose = resolve; });
+  t.mock.method(fixture.page, 'goto', () => {
+    notifyNavigation();
+    return new Promise<null>((_resolve, reject) => { rejectNavigation = reject; });
+  });
+  t.mock.method(fixture.page, 'close', () => {
+    fixture.closed.push('collection-page');
+    rejectNavigation(new Error('DUMMY_REVIEW_SECRET'));
+    return pageClosed;
+  });
+  const abort = new AbortController();
+  const events: CollectionEvent[] = [];
+  const collecting = collectReviews('https://www.google.com/maps/test', event => events.push(event), abort.signal);
+  await navigationStarted;
+  abort.abort();
+  assert.deepEqual(fixture.closed, ['collection-page']);
+  finishClose();
+  await collecting;
+  assert.deepEqual(fixture.closed, ['collection-page', 'disconnect']);
+  assert.deepEqual(events.map(event => event.type), ['status']);
+});
+
+test('本文省略のフラグは保持し、verifiedは全件数確認として扱う', async (t) => {
+  const fixture = mockCollectionPage(t, {
+    entries: [{ role: 'tab', label: 'クチコミ' }],
+    reviews: [{ ...row, text_may_be_truncated: true }],
+  });
+  const events: CollectionEvent[] = [];
+  await collectReviews('https://www.google.com/maps/test', event => events.push(event), new AbortController().signal);
+  const done = events.at(-1);
+  assert.equal(done?.type, 'done');
+  if (done?.type === 'done') {
+    assert.equal(done.data.verified, true);
+    assert.equal(done.data.reviews[0].text_may_be_truncated, true);
+  }
+  assert.deepEqual(fixture.closed, ['collection-page', 'disconnect']);
 });
