@@ -6,7 +6,12 @@ export const maxDuration = 300;
 
 export async function POST(request: Request) {
   const origin = request.headers.get('origin');
-  if (origin && origin !== new URL(request.url).origin) return Response.json({ error: '許可されていないリクエストです。' }, { status: 403 });
+  if (origin) {
+    const requestHost = request.headers.get('host') || new URL(request.url).host;
+    try {
+      if (new URL(origin).host !== requestHost) throw new Error('Origin mismatch');
+    } catch { return Response.json({ error: '許可されていないリクエストです。' }, { status: 403 }); }
+  }
   let url: string;
   try {
     const body = await request.json();

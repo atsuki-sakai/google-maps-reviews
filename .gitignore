@@ -22,3 +22,4 @@ node_modules/
 !web/package-lock.json
 !web/tsconfig.json
 !web/components.json
+!web/vercel.json

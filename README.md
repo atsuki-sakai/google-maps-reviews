@@ -136,6 +136,8 @@ GitHubリポジトリ `atsuki-sakai/google-maps-reviews` をVercelのGit Integra
 
 Build Commandは `npm run lint && npm test && npm run build`。Vercel上のブラウザー起動とGoogleの表示制限は、静的ビルドの成功とは別に実際の収集で確認が必要です。
 
+ビルド設定は `web/vercel.json`、Node.js 22の指定は `web/package.json` に保存しています。初回の連携でLogin Connectionを求められた場合は、[VercelのAuthentication設定](https://vercel.com/account/settings/authentication)でGitHubアカウントを接続し、このリポジトリへのアクセスを許可してください。
+
 ```bash
 # 静的チェック・純粋関数のテスト・本番ビルド
 npm run lint
@@ -154,6 +156,6 @@ Python CLIとWeb版は同じ `extract_reviews.js` を利用します。変更時
 
 この確認にはログイン済みのCodex内ブラウザーと同梱の抽出・保存処理を使用しています。専用Chromeでのコマンド通し実行による全件収集は、まだ未確認です。Google側の表示変更、ログイン、確認画面、通信状況で停止する場合があります。店舗ごとに取得情報で件数を確認してください。
 
-実装で参照した公式ドキュメント：[Pythonのパッケージ設定](https://packaging.python.org/en/latest/guides/writing-pyproject-toml/)、[GitHub ActionsでのPythonテスト](https://docs.github.com/en/actions/tutorials/build-and-test-code/python)、[Playwrightの要素操作](https://playwright.dev/python/docs/api/class-locator)。
+実装で参照した公式ドキュメント：[Pythonのパッケージ設定](https://packaging.python.org/en/latest/guides/writing-pyproject-toml/)、[VercelとGitHubの連携](https://vercel.com/docs/git/vercel-for-github)、[Playwrightの要素操作](https://playwright.dev/python/docs/api/class-locator)。
 
 宿泊施設の「5/5」形式にも対応しています。itachiyaの実画面では表示総件数6件に対し、7件の口コミカードを読み取れました。この不一致は全件確認済みとしません。
