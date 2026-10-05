@@ -63,6 +63,7 @@ class ReviewsTest(unittest.TestCase):
             self.assertFalse(any(cell.data_type == "f" for sheet in book for row in sheet for cell in row))
 
     def test_google_maps_urls_only(self):
+        self.assertEqual(maps_url("  https://maps.app.goo.gl/example\n"), "https://maps.app.goo.gl/example")
         for url in ["https://maps.app.goo.gl/example", "https://www.google.com/maps/place/example", "https://maps.google.co.jp/?q=example"]:
             self.assertEqual(maps_url(url), url)
         for url in ["https://example.com/maps", "https://google.com.example.com/maps", "file:///tmp/a", "https://www.google.com/search?q=example"]:

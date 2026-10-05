@@ -43,12 +43,28 @@ test('不正URLと大きな本文を収集開始前に拒否する', async () =>
   const server = createCollectorServer({ collect: async () => { called++; } });
   const endpoint = await listen(server);
   try {
-    for (const body of ['bad-json', JSON.stringify({ url: 'https://evil.example/maps' }), JSON.stringify({ url: 'x'.repeat(20000) })]) {
+    for (const body of ['bad-json', JSON.stringify({ url: 'https://evil.example/maps' }), JSON.stringify({ url: 'x'.repeat(20000) }),
+      ...[0, -1, 2147364, 1.5, '1200'].map(timeout => JSON.stringify({ url: 'https://www.google.com/maps/place/Test', timeout }))]) {
       const response = await fetch(`${endpoint}/collect`, { method: 'POST', headers, body });
       assert.equal(response.status, 400);
       assert.doesNotMatch(await response.text(), /SyntaxError|Unexpected|bad-json/);
     }
     assert.equal(called, 0);
+  } finally { await close(server); }
+});
+
+test('CLIで指定した収集時間をブラウザーの収集処理へ渡す', async () => {
+  const received: number[] = [];
+  const server = createCollectorServer({ collect: async (_url, _emit, _signal, timeoutMs) => { received.push(timeoutMs!); } });
+  const endpoint = await listen(server);
+  try {
+    for (const timeout of [undefined, 1200, 7201]) {
+      const response = await fetch(`${endpoint}/collect`, { method: 'POST', headers,
+        body: JSON.stringify({ url: 'https://www.google.com/maps/place/Test', timeout }) });
+      assert.equal(response.status, 200);
+      await response.text();
+    }
+    assert.deepEqual(received, [300000, 1200000, 7201000]);
   } finally { await close(server); }
 });
 

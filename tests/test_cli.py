@@ -2,6 +2,7 @@ import csv
 import importlib.util
 import io
 import json
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -74,7 +75,7 @@ class InstalledCliTest(unittest.TestCase):
             book.close()
 
     def test_conflicting_scope_options_are_rejected(self):
-        for options in [("--all", "--max", "5"), ("--all", "--visible-only")]:
+        for options in [("--all", "--max", "5"), ("--all", "--visible-only"), ("--visible-only", "--max", "5")]:
             result = subprocess.run(
                 ["google-maps-reviews", *options], capture_output=True, text=True,
             )
@@ -157,6 +158,11 @@ class InstalledCliTest(unittest.TestCase):
                 installing.assert_called_once_with([sys.executable, "-m", "playwright", "install", "chromium"], check=False)
             self.assertEqual(console.load_settings(path)["browser"], "chromium")
 
+    def test_setup_defaults_to_existing_chrome_without_a_download(self):
+        with patch.object(console, "setup_browser", return_value=0) as setup:
+            self.assertEqual(cli.main(["setup"]), 0)
+            self.assertEqual(setup.call_args.args[0], "chrome")
+
 
 class LocalServiceCliTest(unittest.TestCase):
     def payload(self, count, total=2):
@@ -180,7 +186,7 @@ class LocalServiceCliTest(unittest.TestCase):
             self.assertTrue(data["metadata"]["full_coverage_verified"])
             self.assertEqual(data["metadata"]["collector"], "このMacの収集サービス")
             self.assertEqual(opener.open.call_args.args[0].full_url, "http://127.0.0.1:38473/collect")
-            self.assertEqual(json.loads(opener.open.call_args.args[0].data), {"url": "https://www.google.com/maps/test"})
+            self.assertEqual(json.loads(opener.open.call_args.args[0].data), {"url": "https://www.google.com/maps/test", "timeout": 300})
 
     def test_stream_failure_preserves_partial_reviews_and_returns_incomplete(self):
         for ending in ([{"type": "error", "message": "収集エラー"}], []):
@@ -239,6 +245,90 @@ class LocalServiceCliTest(unittest.TestCase):
             self.assertEqual(list(Path(folder).iterdir()), [])
             opener.open.assert_called_once()
 
+    def test_cli_recovers_stalled_loading_and_collects_late_rating_only_review(self):
+        page = MagicMock()
+        page.url = "https://www.google.com/maps/test"
+        initial = self.payload(1)
+        complete = self.payload(2)
+        complete["reviews"][1]["text"] = ""
+        def extracted(data):
+            return {"place_name": data["place"], "source_url": data["sourceUrl"], "displayed_total": 2, "reviews": data["reviews"]}
+        page.evaluate.side_effect = [extracted(initial)] * 11 + [extracted(complete)]
+        context = MagicMock(pages=[page])
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as folder, patch.object(cli, "collect_from_local_service", return_value=False), \
+                patch("playwright.sync_api.sync_playwright"), patch.object(cli, "collection_browser") as launching, \
+                patch.object(cli, "prepare_reviews"), patch.object(cli, "blocked", return_value=False), \
+                patch.object(cli, "expand_text"), patch.object(cli, "review_scroll_state", return_value={"at_end": True}), \
+                patch.object(cli, "scroll_reviews") as scrolling, patch.object(cli.time, "sleep"), redirect_stdout(output):
+            launching.return_value.__enter__.return_value = context
+            self.assertEqual(cli.main([page.url, "--all", "--output-dir", folder]), 0)
+            self.assertEqual(scrolling.call_count, 11)
+            self.assertTrue(any(call.kwargs.get("recover") for call in scrolling.call_args_list))
+            data = json.loads(next(Path(folder).glob("*.json")).read_text())
+            self.assertEqual(data["metadata"]["count"], 2)
+            self.assertTrue(data["metadata"]["full_coverage_verified"])
+            self.assertEqual(data["reviews"][1]["text"], "")
+            self.assertEqual(data["metadata"]["text_review_count"], 1)
+            self.assertEqual(data["metadata"]["rating_only_count"], 1)
+            self.assertEqual(data["metadata"]["missing_count"], 0)
+            self.assertEqual(output.getvalue().count("取得済み: 1件"), 1)
+
+    def test_visible_only_keeps_more_than_the_default_100_reviews_without_scrolling(self):
+        page = MagicMock()
+        page.url = "https://www.google.com/maps/test"
+        payload = self.payload(125, total=331)
+        page.evaluate.return_value = {"place_name": payload["place"], "source_url": payload["sourceUrl"],
+                                      "displayed_total": 331, "reviews": payload["reviews"]}
+        context = MagicMock(pages=[page])
+        with tempfile.TemporaryDirectory() as folder, patch.object(cli, "collect_from_local_service", return_value=False), \
+                patch("playwright.sync_api.sync_playwright"), patch.object(cli, "collection_browser") as launching, \
+                patch.object(cli, "prepare_reviews"), patch.object(cli, "blocked", return_value=False), \
+                patch.object(cli, "expand_text"), patch.object(cli, "scroll_reviews") as scrolling, redirect_stdout(io.StringIO()):
+            launching.return_value.__enter__.return_value = context
+            self.assertEqual(cli.main([page.url, "--visible-only", "--output-dir", folder]), 0)
+            scrolling.assert_not_called()
+            metadata = json.loads(next(Path(folder).glob("*.json")).read_text())["metadata"]
+            self.assertEqual(metadata["count"], 125)
+            self.assertEqual(metadata["missing_count"], 206)
+            self.assertFalse(metadata["full_coverage_verified"])
+
+    def test_invalid_destination_fails_before_starting_collection(self):
+        with tempfile.TemporaryDirectory() as folder:
+            file = Path(folder) / "already-a-file"
+            file.write_text("keep this")
+            with patch.object(cli, "collect_from_local_service") as collecting, redirect_stderr(io.StringIO()):
+                self.assertEqual(cli.main(["https://www.google.com/maps/test", "--all", "--output-dir", str(file)]), 1)
+                collecting.assert_not_called()
+            self.assertEqual(file.read_text(), "keep this")
+
+    def test_incomplete_retry_command_preserves_browser_and_collection_options(self):
+        def partial(args, reviews, metadata):
+            data = self.payload(1)
+            cli.merge_reviews(reviews, data["reviews"], data["place"], data["sourceUrl"])
+            metadata.update(place_name=data["place"], displayed_total_end=2, stop_reason="制限時間に到達")
+            return True
+        with tempfile.TemporaryDirectory(prefix="reviews folder ") as folder, \
+                patch.object(cli, "collect_from_local_service", side_effect=partial), \
+                patch.object(sys.stdin, "isatty", return_value=True), redirect_stdout(io.StringIO()):
+            errors = io.StringIO()
+            with redirect_stderr(errors):
+                self.assertEqual(cli.main(["https://www.google.com/maps/test", "--all", "--manual", "--browser", "chromium",
+                                           "--delay", "3", "--output-dir", folder]), 2)
+            retry = next(line.split(": ", 1)[1] for line in errors.getvalue().splitlines() if line.startswith("待機時間を延ばして再実行:"))
+            tokens = shlex.split(retry)
+            self.assertIn("--manual", tokens)
+            for option, expected in [("--timeout", "1200"), ("--browser", "chromium"), ("--delay", "3.0"), ("--output-dir", str(Path(folder).resolve()))]:
+                self.assertEqual(tokens[tokens.index(option) + 1], expected)
+
+    def test_custom_timeout_is_forwarded_to_the_local_collector(self):
+        opener = MagicMock()
+        opener.open.side_effect = [io.BytesIO(b'{"ready":true,"version":"1.0.0"}'),
+                                   self.stream([{"type": "done", "data": self.payload(2)}])]
+        with tempfile.TemporaryDirectory() as folder, patch.object(cli, "build_opener", return_value=opener), redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main(["https://www.google.com/maps/test", "--all", "--timeout", "1200", "--output-dir", folder]), 0)
+            self.assertEqual(json.loads(opener.open.call_args.args[0].data)["timeout"], 1200)
+
     def test_unverified_service_result_is_not_reported_as_complete(self):
         data = dict(self.payload(2), verified=False, reason="途中で停止しました")
         opener = MagicMock()
@@ -250,7 +340,7 @@ class LocalServiceCliTest(unittest.TestCase):
             self.assertFalse(metadata["full_coverage_verified"])
 
     def test_custom_options_and_unavailable_service_keep_the_cli_browser(self):
-        for flags in (["--max", "5"], ["--all", "--manual"], ["--all", "--visible-only"],
+        for flags in (["--max", "5"], ["--all", "--manual"], ["--visible-only"],
                       ["--all", "--browser", "chromium"], ["--all", "--delay", "3"]):
             args = cli.build_parser().parse_args(["https://www.google.com/maps/test", *flags])
             with patch.object(cli, "build_opener") as opener:

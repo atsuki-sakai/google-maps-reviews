@@ -22,7 +22,7 @@ function reply(response: ServerResponse, status: number, value: unknown) {
   response.end(JSON.stringify(value));
 }
 
-async function readUrl(request: IncomingMessage) {
+async function readCollectionOptions(request: IncomingMessage) {
   const chunks: Buffer[] = [];
   let length = 0;
   for await (const chunk of request) {
@@ -33,9 +33,13 @@ async function readUrl(request: IncomingMessage) {
   }
   let value: unknown;
   try { value = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw new Error('URLを確認してください。'); }
-  const url = (value as { url?: unknown } | null)?.url;
+  const options = value as { url?: unknown; timeout?: unknown } | null;
+  const url = options?.url;
   if (typeof url !== 'string' || url.length > 8192) throw new Error('URLを確認してください。');
-  return validateMapsUrl(url);
+  const timeout = options?.timeout ?? 300;
+  if (typeof timeout !== 'number' || !Number.isSafeInteger(timeout) || timeout < 1 || timeout * 1000 + 120000 > 2147483647)
+    throw new Error('収集の制限時間は1以上の整数秒で指定してください（最大2147363秒）。');
+  return { url: validateMapsUrl(url), timeoutMs: timeout * 1000 };
 }
 
 export function createCollectorServer({ collect = collectReviews, ready = async () => true }: Options = {}) {
@@ -66,8 +70,8 @@ export function createCollectorServer({ collect = collectReviews, ready = async 
       reply(response, 404, { error: 'この操作には対応していません。' });
       return;
     }
-    let url: string;
-    try { url = await readUrl(request); }
+    let options: { url: string; timeoutMs: number };
+    try { options = await readCollectionOptions(request); }
     catch (error) {
       reply(response, 400, { error: error instanceof Error ? error.message : 'URLを確認してください。' });
       return;
@@ -80,7 +84,8 @@ export function createCollectorServer({ collect = collectReviews, ready = async 
     const abort = new AbortController();
     const cancel = () => abort.abort();
     response.on('close', cancel);
-    const timeout = setTimeout(cancel, 280000);
+    // Navigation/prepare time is separate from the CLI's collection time budget.
+    const timeout = setTimeout(cancel, options.timeoutMs + 120000);
     response.writeHead(200, {
       'Content-Type': 'text/event-stream; charset=utf-8',
       'Cache-Control': 'no-store',
@@ -90,7 +95,7 @@ export function createCollectorServer({ collect = collectReviews, ready = async 
     const emit = (event: CollectionEvent) => {
       if (!response.destroyed && !abort.signal.aborted) response.write(`data: ${JSON.stringify(event)}\n\n`);
     };
-    try { await collect(url, emit, abort.signal); }
+    try { await collect(options.url, emit, abort.signal, options.timeoutMs); }
     catch (error) {
       if (!abort.signal.aborted) {
         if (error instanceof Error && !(error instanceof PublicCollectionError)) {

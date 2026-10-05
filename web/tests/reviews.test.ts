@@ -35,12 +35,15 @@ function mockCollectionPage(t: TestContext, options: {
   reviews?: Review[];
   displayedTotal?: number | null;
   atEnd?: boolean;
+  loadAfterWheels?: { wheels: number; reviews: Review[] };
 }) {
   let now = 0;
   let opened = false;
   const clicked: string[] = [];
   const closed: string[] = [];
-  const reviews = options.reviews || [row];
+  let wheels = 0;
+  const reviews = () => options.loadAfterWheels && wheels >= options.loadAfterWheels.wheels
+    ? options.loadAfterWheels.reviews : options.reviews || [row];
   t.mock.method(Date, 'now', () => now);
   const previous = process.env.BROWSER_CDP_URL;
   process.env.BROWSER_CDP_URL = 'http://browser.invalid';
@@ -48,15 +51,16 @@ function mockCollectionPage(t: TestContext, options: {
     if (previous === undefined) delete process.env.BROWSER_CDP_URL;
     else process.env.BROWSER_CDP_URL = previous;
   });
-  const cardCount = () => opened ? reviews.length : options.overviewCount || 0;
+  const cardCount = () => opened ? reviews().length : options.overviewCount || 0;
   const cards = {
     async count() { return cardCount(); },
+    async evaluateAll() { return reviews().map((review, index) => ({ id: review.review_id, index })); },
     first: () => ({
       async waitFor() { if (!cardCount()) throw new Error('DUMMY_REVIEW_SECRET'); },
-      async evaluate() { return { total: 100, atEnd: options.atEnd ?? true, x: 10, y: 10 }; },
+      async evaluate() { return { total: 100, height: 40, atEnd: options.atEnd ?? true, x: 10, y: 10 }; },
     }),
     nth: (index: number) => ({
-      async getAttribute() { return reviews[index % reviews.length].review_id; },
+      async getAttribute() { return reviews()[index % reviews().length].review_id; },
       getByRole: () => ({ async count() { return 0; } }),
     }),
   };
@@ -86,8 +90,8 @@ function mockCollectionPage(t: TestContext, options: {
     },
     locator: (selector: string) => selector === 'body'
       ? { async innerText() { return options.body || ''; } } : cards,
-    async evaluate() { return { place_name: 'テスト店舗', source_url: 'https://www.google.com/maps/test', displayed_total: options.displayedTotal === undefined ? reviews.length : options.displayedTotal, reviews }; },
-    mouse: { async move() {}, async wheel() {} },
+    async evaluate() { return { place_name: 'テスト店舗', source_url: 'https://www.google.com/maps/test', displayed_total: options.displayedTotal === undefined ? reviews().length : options.displayedTotal, reviews: reviews() }; },
+    mouse: { async move() {}, async wheel() { wheels++; } },
     async waitForTimeout(ms: number) { now += ms; },
     async close() { closed.push('collection-page'); },
   } as unknown as Page;
@@ -119,7 +123,7 @@ test('総件数に一致したら末尾に未到達でも追加スクロール�
   assert.deepEqual(fixture.closed, ['collection-page', 'disconnect']);
 });
 
-test('総件数が不明または未達の場合は追加読み込みを続ける', async (t) => {
+test('総件数が不明なら停滞で未確認終了、未達なら指定時間まで回復を試す', async (t) => {
   for (const displayedTotal of [null, 2]) {
     await t.test(String(displayedTotal), async (fixtureTest) => {
       const fixture = mockCollectionPage(fixtureTest, {
@@ -127,15 +131,32 @@ test('総件数が不明または未達の場合は追加読み込みを続け�
       });
       const wheel = fixtureTest.mock.method(fixture.page.mouse, 'wheel', async () => {});
       const events: CollectionEvent[] = [];
-      await collectReviews('https://www.google.com/maps/test', event => events.push(event), new AbortController().signal);
+      await collectReviews('https://www.google.com/maps/test', event => events.push(event), new AbortController().signal, 20000);
       const done = events.at(-1);
       assert.equal(done?.type, 'done');
       if (done?.type !== 'done') assert.fail('完了イベントがありません');
       assert.equal(done.data.verified, false);
-      assert.match(done.data.reason, /末尾/);
+      assert.match(done.data.reason, displayedTotal === null ? /総件数が不明/ : /制限時間/);
+      assert.ok(events.some(event => event.type === 'status' && /再スクロール/.test(event.message)));
       assert.ok(wheel.mock.callCount() > 0);
     });
   }
+});
+
+test('末尾で5回以上止まった後の追加口コミも収集し、総件数一致で終了する', async (t) => {
+  const fixture = mockCollectionPage(t, {
+    entries: [{ role: 'tab', label: '口コミ' }], displayedTotal: 2,
+    loadAfterWheels: { wheels: 9, reviews: [row, { ...row, review_id: 'rating-only', text: '' }] },
+  });
+  const wheel = t.mock.method(fixture.page.mouse, 'wheel', fixture.page.mouse.wheel);
+  const events: CollectionEvent[] = [];
+  await collectReviews('https://www.google.com/maps/test', event => events.push(event), new AbortController().signal);
+  const done = events.at(-1);
+  if (done?.type !== 'done') assert.fail('完了イベントがありません');
+  assert.equal(done.data.verified, true);
+  assert.equal(done.data.reviews.length, 2);
+  assert.ok(wheel.mock.calls.some(call => call.arguments[1] < 0));
+  assert.deepEqual(fixture.closed, ['collection-page', 'disconnect']);
 });
 
 test('旧Web APIは収集を始めずCLIへの案内を返す', async (t) => {

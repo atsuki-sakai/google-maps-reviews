@@ -99,7 +99,7 @@ def edit_settings(current: dict) -> dict:
                              lambda value: "" if value in ("", "-") else cli.maps_url(value))
     settings["scope"] = choose("収集範囲", {"1": ("全件を目指す（取得の保証はありません）", "all"),
                                         "2": ("最大件数を指定", "max"), "3": ("現在読み込まれた口コミのみ", "visible")}, settings["scope"])
-    if settings["scope"] != "all":
+    if settings["scope"] == "max":
         settings["max"] = prompt("最大保存件数", settings["max"], cli.positive_int)
     settings["timeout"] = prompt("収集の制限時間（秒、手動操作時間を除く）", settings["timeout"], cli.positive_int)
     settings["delay"] = prompt("スクロール後の待機時間（0.5〜60秒）", settings["delay"], cli.positive_seconds)
@@ -189,7 +189,7 @@ def dispatch(argv: list[str], parser) -> int:
             subparser = argparse.ArgumentParser(prog=f"google-maps-reviews {command}")
             subparser.add_argument("--config", type=Path, help="設定ファイル")
             if command == "setup":
-                subparser.add_argument("--browser", choices=("chrome", "chromium"), default="chromium", help="Chrome確認またはChromiumダウンロード（既定:chromium）")
+                subparser.add_argument("--browser", choices=("chrome", "chromium"), default="chrome", help="Chrome確認またはChromiumダウンロード（既定:chrome）")
                 args = subparser.parse_args(argv[1:])
                 return setup_browser(args.browser, config_path(args.config))
             subparser.add_argument("action", nargs="?", choices=("show", "edit", "reset"), default="show")

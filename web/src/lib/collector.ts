@@ -47,7 +47,7 @@ export async function prepareReviews(page: Page, isCancelled: () => boolean) {
   throw new PublicCollectionError('口コミ一覧が見つかりません。店舗ページの共有URLを確認してください。');
 }
 
-export async function collectReviews(url: string, emit: (event: CollectionEvent) => void, signal: AbortSignal) {
+export async function collectReviews(url: string, emit: (event: CollectionEvent) => void, signal: AbortSignal, timeoutMs = 300000) {
   let browser: Browser | undefined;
   let ownedPage: Page | undefined;
   let closingPage: Promise<void> | undefined;
@@ -58,7 +58,6 @@ export async function collectReviews(url: string, emit: (event: CollectionEvent)
   const cdpUrl = process.env.BROWSER_CDP_URL;
   const rows = new Map<string, Review>();
   let result: Collection = { place: '', sourceUrl: url, displayedTotal: null, reviews: [], verified: false, reason: '' };
-  const started = Date.now();
   let cancelled = signal.aborted;
   const abort = () => { cancelled = true; void closeOwnedPage(); };
   signal.addEventListener('abort', abort, { once: true });
@@ -86,15 +85,20 @@ export async function collectReviews(url: string, emit: (event: CollectionEvent)
     await prepareReviews(page, () => cancelled);
     if (cancelled) return;
     emit({ type: 'status', message: '口コミを読み込み、本文の省略を展開しています。' });
+    const started = Date.now();
     const expanded = new Set<string>();
     let stalled = 0;
-    while (!cancelled && Date.now() - started < 255000) {
+    while (!cancelled && Date.now() - started < timeoutMs) {
       const before = rows.size;
       const cards = page.locator(cardsSelector);
-      for (let i = 0; i < await cards.count(); i++) {
-        const card = cards.nth(i);
-        const id = await card.getAttribute('data-review-id');
+      // Read IDs in one browser call. Revisiting every old card through CDP on
+      // every page used most of the time budget on large review lists.
+      const candidates = await cards.evaluateAll(elements => elements.map((card, index) => ({
+        id: card.getAttribute('data-review-id'), index,
+      })));
+      for (const { id, index } of candidates) {
         if (!id || expanded.has(id)) continue;
+        const card = cards.nth(index);
         const more = card.getByRole('button', { name: /^(もっと見る|全文を表示|More|See more|Read more)$/i });
         if (await more.count()) {
           try { await more.first().click({ timeout: 2500 }); } catch { /* A remaining button is reported in the exported row. */ }
@@ -104,7 +108,7 @@ export async function collectReviews(url: string, emit: (event: CollectionEvent)
       const data = await page.evaluate('(' + extractorSource + ')()') as Extracted;
       mergeReviews(rows, data.reviews);
       if (data.reviews.length && !rows.size) throw new PublicCollectionError('口コミの投稿者または評価を読み取れません。表示形式の対応が必要です。');
-      result = { place: data.place_name, sourceUrl: data.source_url, displayedTotal: data.displayed_total,
+      result = { place: data.place_name, sourceUrl: data.source_url, displayedTotal: data.displayed_total ?? result.displayedTotal,
         reviews: [...rows.values()], verified: false, reason: '' };
       emit({ type: 'progress', data: result });
       if (isFullCoverage(result.reviews, result.displayedTotal)) {
@@ -115,15 +119,26 @@ export async function collectReviews(url: string, emit: (event: CollectionEvent)
         for (let el = card.parentElement; el; el = el.parentElement) {
           const rect = el.getBoundingClientRect();
           if (/(auto|scroll)/.test(getComputedStyle(el).overflowY) && el.clientHeight > 0 && rect.width > 0)
-            return { total: el.scrollHeight, atEnd: el.scrollTop + el.clientHeight >= el.scrollHeight - 8,
-              x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+            return { total: el.scrollHeight, height: el.clientHeight,
+              atEnd: el.scrollTop + el.clientHeight >= el.scrollHeight - 8,
+              x: Math.max(1, Math.min(innerWidth - 1, rect.x + rect.width / 2)),
+              y: Math.max(1, Math.min(innerHeight - 1, rect.y + rect.height / 2)) };
         }
         return null;
       });
       if (!state) throw new PublicCollectionError('口コミ一覧のスクロール領域を確認できません。');
       stalled = before === rows.size && state.atEnd ? stalled + 1 : 0;
-      if (stalled >= 5) { result.reason = '口コミ一覧の末尾まで読み込みました。'; break; }
+      // The end of the currently loaded DOM is not the end of all reviews.
+      // When a known total is still missing, retry until the collection deadline.
+      if (stalled >= 8 && result.displayedTotal === null) {
+        result.reason = '画面の総件数が不明で追加読み込みがないため停止（全件取得は未確認）'; break;
+      }
       await page.mouse.move(state.x, state.y);
+      if (stalled > 0 && stalled % 3 === 0) {
+        emit({ type: 'status', message: '追加読み込みを待ち、口コミ一覧を再スクロールしています。' });
+        await page.mouse.wheel(0, -state.height);
+        await page.waitForTimeout(500);
+      }
       await page.mouse.wheel(0, state.total);
       await page.waitForTimeout(1600);
     }

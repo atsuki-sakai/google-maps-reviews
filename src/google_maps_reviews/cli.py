@@ -7,7 +7,9 @@ import csv
 import hashlib
 import json
 import re
+import shlex
 import sys
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -30,6 +32,7 @@ FIELDS = [
 
 
 def maps_url(value: str) -> str:
+    value = value.strip()
     parsed = urlparse(value)
     host = (parsed.hostname or "").lower()
     valid = (
@@ -137,6 +140,8 @@ def export_reviews(rows: list[dict], metadata: dict, output_dir: Path, stem: str
         "displayed_total_start": "開始時の画面総件数", "displayed_total_end": "終了時の画面総件数",
         "full_coverage_verified": "総件数と重複なし保存件数の一致", "truncated_count": "本文の省略表示が残った件数",
         "incomplete": "全件取得未確認",
+        "text_review_count": "本文ありの口コミ件数", "rating_only_count": "評価のみの口コミ件数",
+        "missing_count": "画面総件数との差（未取得件数）",
     }
     for key, value in metadata.items():
         summary.append([labels.get(key, key), spreadsheet_value(str(value))])
@@ -205,10 +210,10 @@ def prepare_reviews(page, manual: bool):
 
 def expand_text(page, processed: set[str]):
     cards = page.locator(REVIEW_CARD_SELECTOR)
-    for index in range(cards.count()):
+    ids = cards.evaluate_all("cards => cards.map(card => card.getAttribute('data-review-id'))")
+    for index, review_id in enumerate(ids):
         card = cards.nth(index)
-        review_id = card.get_attribute("data-review-id")
-        if review_id in processed:
+        if not review_id or review_id in processed:
             continue
         buttons = card.get_by_role("button", name=re.compile(r"^(もっと見る|全文を表示|More|See more|Read more)$", re.I))
         for button_index in range(buttons.count()):
@@ -239,13 +244,17 @@ def review_scroll_state(page) -> dict:
     }""")
 
 
-def scroll_reviews(page) -> dict:
+def scroll_reviews(page, recover: bool = False) -> dict:
     state = review_scroll_state(page)
     if not state:
         raise RuntimeError("口コミ一覧のスクロール領域を特定できません。口コミタブを開いて再実行してください。")
     # Native wheel input triggers Maps' lazy loading. All currently loaded cards
     # are captured before this jump; expanding each review only once avoids resets.
     page.mouse.move(state["x"], state["y"])
+    if recover:
+        # Leaving and re-entering the loaded bottom re-triggers lazy loading.
+        page.mouse.wheel(0, -state["height"])
+        page.wait_for_timeout(500)
     page.mouse.wheel(0, max(state["total"], state["height"] * 3))
     return state
 
@@ -277,8 +286,8 @@ def build_parser():
     scope = parser.add_mutually_exclusive_group()
     scope.add_argument("--max", type=positive_int, default=100, help="最大取得件数（既定:100）")
     scope.add_argument("--all", action="store_true", help="件数上限なしで収集し、画面の総件数との一致を確認")
+    scope.add_argument("--visible-only", action="store_true", help="スクロールせず現在読み込まれた口コミを件数上限なしで保存")
     parser.add_argument("--manual", action="store_true", help="口コミの画面を自分で開いてから収集")
-    parser.add_argument("--visible-only", action="store_true", help="スクロールせず現在読み込まれた口コミだけ保存")
     parser.add_argument("--delay", type=positive_seconds, default=2.0, help="スクロール後の待機秒数（既定:2）")
     parser.add_argument("--timeout", type=positive_int, default=300, help="収集の制限秒数（既定:300、手動操作時間を除く）")
     parser.add_argument("--output-dir", type=Path, default=Path.home() / "Desktop" / "GoogleMap口コミ")
@@ -313,19 +322,16 @@ def collect_from_local_service(args, reviews: dict, metadata: dict) -> bool:
             return False
     except (OSError, ValueError, AttributeError):
         return False
-    metadata["collector"] = "このMacの収集サービス"
-    started = time.monotonic()
+    metadata.update(collector="このMacの収集サービス", service_verified=False)
     last_progress = None
     try:
         if health.get("busy"):
             raise RuntimeError("このMacでは口コミを収集中です。完了後に再実行してください。")
         print("このMacの専用Chromeで収集しています。", flush=True)
-        request = Request(endpoint + "/collect", data=json.dumps({"url": args.url}).encode(),
+        request = Request(endpoint + "/collect", data=json.dumps({"url": args.url, "timeout": args.timeout}).encode(),
                           headers=dict(headers, **{"Content-Type": "application/json"}))
-        with opener.open(request, timeout=args.timeout) as response:
+        with opener.open(request, timeout=args.timeout + 120) as response:
             for line in response:
-                if time.monotonic() - started >= args.timeout:
-                    raise RuntimeError("制限時間に到達しました。取得済みの口コミを保存します。")
                 if not line.startswith(b"data: "):
                     continue
                 event = json.loads(line[6:])
@@ -360,10 +366,20 @@ def collect_from_local_service(args, reviews: dict, metadata: dict) -> bool:
 
 
 def run_collection(args) -> int:
-    limit = sys.maxsize if args.all else args.max
+    limit = sys.maxsize if args.all or args.visible_only else args.max
+    output_dir = args.output_dir.expanduser().resolve()
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        # Check the chosen destination before opening Chrome or collecting data.
+        with tempfile.TemporaryFile(dir=output_dir):
+            pass
+    except OSError as error:
+        print(f"保存先を準備できません: {output_dir}\n{error}", file=sys.stderr)
+        return 1
     now = datetime.now().astimezone()
     stamp = now.strftime("%Y%m%d_%H%M%S_%f")
-    metadata = {"collected_at": now.isoformat(timespec="seconds"), "requested_max": "全件" if args.all else args.max,
+    metadata = {"collected_at": now.isoformat(timespec="seconds"),
+                "requested_max": "全件" if args.all else "読み込み済み全件" if args.visible_only else args.max,
                 "coverage": "画面から読み取れた口コミのみ。全件取得の保証はありません。"}
     reviews = {}
     if args.demo:
@@ -393,6 +409,7 @@ def run_collection(args) -> int:
                     started = time.monotonic()
                     stagnant = 0
                     expanded_ids = set()
+                    last_progress = None
                     while True:
                         if blocked(page):
                             metadata["stop_reason"] = "確認画面のため停止"
@@ -407,7 +424,10 @@ def run_collection(args) -> int:
                         added = merge_reviews(reviews, data["reviews"], place, data["source_url"])
                         if data["reviews"] and not reviews:
                             raise RuntimeError("口コミは表示されていますが、投稿者または評価を読み取れません。ツールを更新してください。")
-                        print(f"取得済み: {min(len(reviews), limit)}件 / 画面の総件数: {metadata.get('displayed_total_end', '不明')}", flush=True)
+                        progress = (min(len(reviews), limit), metadata.get('displayed_total_end'))
+                        if progress != last_progress:
+                            print(f"取得済み: {progress[0]}件 / 画面の総件数: {progress[1] if progress[1] is not None else '不明'}", flush=True)
+                            last_progress = progress
                         if len(reviews) >= limit:
                             metadata["stop_reason"] = "指定件数に到達"
                             break
@@ -424,10 +444,13 @@ def run_collection(args) -> int:
                             raise RuntimeError("口コミカードを読み取れません。画面変更または未対応の表示形式です。")
                         state = review_scroll_state(page)
                         stagnant = next_stagnant_count(stagnant, added, state)
-                        if stagnant >= 8:
-                            metadata["stop_reason"] = "口コミ一覧の末尾で追加読み込みがないため停止（全件取得は未確認）"
+                        if stagnant >= 8 and metadata.get("displayed_total_end") is None:
+                            metadata["stop_reason"] = "画面の総件数が不明で追加読み込みがないため停止（全件取得は未確認）"
                             break
-                        scroll_reviews(page)
+                        recover = stagnant > 0 and stagnant % 3 == 0
+                        if recover:
+                            print("追加読み込みを待ち、口コミ一覧を再スクロールしています。", flush=True)
+                        scroll_reviews(page, recover=recover)
                         time.sleep(args.delay)
                 finally:
                     if context:
@@ -447,10 +470,14 @@ def run_collection(args) -> int:
             print(f"収集中に停止しました: {error}", file=sys.stderr)
     rows = list(reviews.values())[:limit]
     metadata["count"] = len(rows)
+    metadata["text_review_count"] = sum(bool(row.get("text", "").strip()) for row in rows)
+    metadata["rating_only_count"] = len(rows) - metadata["text_review_count"]
     if not args.demo:
         metadata["full_coverage_verified"] = (full_coverage_verified(rows, metadata.get("displayed_total_end"))
                                               and "error" not in metadata and metadata.get("service_verified", True) is True)
         metadata["truncated_count"] = sum(bool(row.get("text_may_be_truncated")) for row in rows)
+        expected = metadata.get("displayed_total_end")
+        metadata["missing_count"] = max(0, expected - len(rows)) if expected is not None else None
         if metadata["full_coverage_verified"]:
             metadata["coverage"] = f"画面の総件数と口コミIDの重複なしの保存件数が一致: {len(rows)}件"
             if args.all and metadata.get("stop_reason", "").startswith("口コミ一覧の末尾"):
@@ -466,11 +493,33 @@ def run_collection(args) -> int:
     name = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", metadata.get("place_name", "口コミ"))[:60].strip(" .") or "口コミ"
     stem = f"{'サンプル_' if args.demo else ''}{name}_口コミ_{stamp}"
     try:
-        paths = export_reviews(rows, metadata, args.output_dir.expanduser().resolve(), stem)
+        paths = export_reviews(rows, metadata, output_dir, stem)
     except Exception as error:
         print(f"ファイル保存に失敗しました: {error}", file=sys.stderr)
         return 1
     print(f"\n{len(rows)}件を保存しました。停止理由: {metadata['stop_reason']}")
+    print(f"本文あり: {metadata['text_review_count']}件 / 評価のみ: {metadata['rating_only_count']}件")
+    if metadata.get("truncated_count"):
+        print(f"本文の省略が残っています: {metadata['truncated_count']}件（JSON・Excelの取得情報を確認してください）。", file=sys.stderr)
+    if metadata.get("incomplete"):
+        remaining = metadata.get("missing_count")
+        if remaining:
+            print(f"未取得: {remaining}件。", file=sys.stderr)
+        elif remaining is None:
+            print("画面の総件数を確認できませんでした。", file=sys.stderr)
+        else:
+            print("保存済みですが、全件取得の完了を確認できませんでした。", file=sys.stderr)
+        if "error" not in metadata and args.url and not metadata["stop_reason"].startswith("ユーザーが中断"):
+            retry = ["google-maps-reviews", args.url, "--all", "--timeout", str(max(1200, args.timeout * 2))]
+            if args.manual:
+                retry.append("--manual")
+            if args.browser != "chrome":
+                retry += ["--browser", args.browser]
+            if args.delay != 2.0:
+                retry += ["--delay", str(args.delay)]
+            if output_dir != (Path.home() / "Desktop" / "GoogleMap口コミ").resolve():
+                retry += ["--output-dir", str(output_dir)]
+            print(f"待機時間を延ばして再実行: {shlex.join(retry)}", file=sys.stderr)
     for path in paths:
         print(path)
     return 2 if "error" in metadata or metadata.get("incomplete") else 0
