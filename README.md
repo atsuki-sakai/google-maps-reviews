@@ -20,7 +20,9 @@ google-maps-reviews
 
 コマンドが見つからない場合は `~/.local/bin/google-maps-reviews` で起動できます。今のターミナルにPATHを追加するには `export PATH="$HOME/.local/bin:$PATH"` を実行します。利用者のシェル設定ファイルは自動で変更しません。
 
-既定のインストール先は `~/.local` です。専用環境は `share/google-maps-reviews/venv`、コマンドは `bin/google-maps-reviews`、保存設定は `share/google-maps-reviews/settings.json` に置きます。既存の別ツールやpipx版コマンドを上書きしません。pipx版の更新は下の「更新・削除」を使ってください。
+既定のインストール先は `~/.local` です。新規導入では、専用環境は `share/google-maps-reviews/venv`、コマンドは `bin/google-maps-reviews`、保存設定は `share/google-maps-reviews/settings.json` に置きます。
+
+同じコマンドがpipxで導入済みの場合は、pipxの登録情報と実行ファイルの一致を確認してからpipxで更新し、既存の設定を引き継ぎます。更新用のPythonソースは `share/google-maps-reviews/pipx-source` に保存するため、その後も `pipx reinstall` が使えます。別ツールや所有情報を確認できないリンクは上書きせず、`--prefix` で別の導入先を指定できます。
 
 取得済みのリポジトリからセットアップする場合：
 
@@ -140,13 +142,13 @@ Excelの「取得情報」で画面の総件数、保存件数、停止理由、
 
 ## 更新・削除
 
-1コマンドでセットアップした版は、同じセットアップコマンドを再実行すると更新できます。`--prefix` を使った場合は同じ導入先を指定してください。保存設定は専用Python環境とは別のファイルに保持します。
+同じセットアップコマンドを再実行すると、専用環境版・pipx版ともに最新のmainへ更新できます。`--prefix` を使った場合は同じ導入先を指定してください。保存設定は専用Python環境とは別のファイルに保持します。
 
-pipx版はリポジトリのフォルダーで実行します。
+ローカルリポジトリのソースでpipx版を更新する場合は、そのフォルダーで実行します。
 
 ```bash
 git pull --ff-only
-pipx reinstall google-maps-reviews
+python3 install-cli.py --source . --browser chrome
 ```
 
 pipx版を削除する場合：

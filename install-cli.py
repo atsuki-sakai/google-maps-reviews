@@ -18,6 +18,65 @@ from urllib.parse import quote
 REPOSITORY = "atsuki-sakai/google-maps-reviews"
 
 
+def find_pipx_installation(prefix: Path):
+    """Accept a symlink only when pipx records this exact app and target."""
+    command = prefix / "bin/google-maps-reviews"
+    pipx = shutil.which("pipx")
+    if not command.is_symlink() or not command.is_file() or not pipx:
+        return None
+    try:
+        result = subprocess.run([pipx, "list", "--json"], capture_output=True, text=True, check=True, timeout=15)
+        package = json.loads(result.stdout)["venvs"]["google-maps-reviews"]["metadata"]["main_package"]
+        if package["package"] != "google-maps-reviews" or "google-maps-reviews" not in package["apps"]:
+            return None
+        target = command.resolve()
+        paths = [Path(value["__Path__"]) if isinstance(value, dict) else Path(value)
+                 for value in package["app_paths"]]
+        if target not in [path.resolve() for path in paths] or target.name != "google-maps-reviews":
+            return None
+        return prefix, target, pipx
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        return None
+
+
+def install_with_pipx(source: Path, installation, browser: str):
+    prefix, executable, pipx = installation
+    if not (source / "pyproject.toml").is_file() or not (source / "src/google_maps_reviews/cli.py").is_file():
+        raise RuntimeError("--sourceにはgoogle-maps-reviewsのリポジトリフォルダーを指定してください。")
+    base = prefix / "share/google-maps-reviews"
+    cached_source = base / "pipx-source"
+    marker = base / "pipx-installation.json"
+    command = prefix / "bin/google-maps-reviews"
+    identity = {"repository": REPOSITORY, "command": str(command), "executable": str(executable)}
+    if marker.exists():
+        if json.loads(marker.read_text(encoding="utf-8")) != identity:
+            raise RuntimeError(f"pipx更新用フォルダーの所有情報を確認できません: {base}")
+    elif cached_source.exists() or cached_source.is_symlink():
+        raise RuntimeError(f"既存のフォルダーを上書きしません: {cached_source}")
+    if cached_source.is_symlink():
+        raise RuntimeError(f"更新用ソースのリンクを上書きしません: {cached_source}")
+    if find_pipx_installation(prefix) != installation:
+        raise RuntimeError("pipxの導入状態が変わりました。セットアップを再実行してください。")
+    base.mkdir(parents=True, exist_ok=True)
+    # Keep the install spec available for future pipx reinstall operations.
+    # Copy only Python package inputs, excluding the web checkout and environments.
+    with tempfile.TemporaryDirectory(prefix=".pipx-source-", dir=base) as folder:
+        staged = Path(folder) / "source"
+        staged.mkdir()
+        for name in ("pyproject.toml", "README.md"):
+            shutil.copy2(source / name, staged / name)
+        shutil.copytree(source / "src", staged / "src", ignore=shutil.ignore_patterns("__pycache__", "*.egg-info"))
+        marker.write_text(json.dumps(identity, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        if cached_source.exists():
+            shutil.rmtree(cached_source)
+        staged.replace(cached_source)
+    print("既存のpipx版を確認しました。pipxで更新し、保存設定を引き継ぎます。", flush=True)
+    subprocess.run([pipx, "install", "--force", str(cached_source)],
+                   env=dict(os.environ, PIPX_BIN_DIR=str(command.parent)), check=True)
+    subprocess.run([str(command), "setup", "--browser", browser], check=True)
+    print(f"\n導入が完了しました。起動: {command}\n管理方法: pipx")
+
+
 def launcher_text(python_command: Path, settings: Path) -> str:
     return ("#!/bin/sh\n# Managed by google-maps-reviews installer\n"
             f"export GOOGLE_MAPS_REVIEWS_CONFIG={shlex.quote(str(settings))}\n"
@@ -108,15 +167,22 @@ def main(argv=None) -> int:
     if os.name == "nt":
         parser.error("このセットアップスクリプトはmacOS/Linux用です。Windowsではpipxなどでパッケージを導入してください。")
     try:
-        destination = check_destination(args.prefix.expanduser().resolve())
+        prefix = args.prefix.expanduser().resolve()
+        pipx_installation = find_pipx_installation(prefix)
+        destination = None if pipx_installation else check_destination(prefix)
+        def install(source):
+            if pipx_installation:
+                install_with_pipx(source, pipx_installation, args.browser)
+            else:
+                install_from_source(source, destination, args.browser)
         if args.source:
-            install_from_source(args.source.expanduser().resolve(), destination, args.browser)
+            install(args.source.expanduser().resolve())
         else:
             if not shutil.which("gh"):
                 raise RuntimeError("GitHub CLI (gh)が必要です。gh auth loginでアクセス権のあるアカウントを認証するか--sourceを指定してください。")
             with tempfile.TemporaryDirectory(prefix="google-maps-reviews-source-") as folder:
                 source = fetch_source(args.ref, Path(folder))
-                install_from_source(source, destination, args.browser)
+                install(source)
         return 0
     except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError, zipfile.BadZipFile) as error:
         print(f"導入できませんでした: {error}", file=sys.stderr)

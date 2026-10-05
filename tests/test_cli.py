@@ -134,6 +134,77 @@ class InstallerTest(unittest.TestCase):
         cls.installer = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(cls.installer)
 
+    def pipx_fixture(self, prefix):
+        target = prefix / "pipx/venvs/google-maps-reviews/bin/google-maps-reviews"
+        target.parent.mkdir(parents=True)
+        target.write_text("pipx app", encoding="utf-8")
+        command = prefix / "bin/google-maps-reviews"
+        command.parent.mkdir()
+        command.symlink_to(target)
+        package = {"package": "google-maps-reviews", "apps": ["google-maps-reviews"],
+                   "app_paths": [{"__Path__": str(target), "__type__": "Path"}]}
+        data = {"venvs": {"google-maps-reviews": {"metadata": {"main_package": package}}}}
+        return command, target, data
+
+    def test_existing_pipx_is_updated_without_replacing_link_or_saved_settings(self):
+        with tempfile.TemporaryDirectory(prefix="pipx space ") as folder:
+            prefix = Path(folder).resolve()
+            command, target, data = self.pipx_fixture(prefix)
+            settings = prefix / "settings.json"
+            settings.write_text('{"max":17}', encoding="utf-8")
+            source = Path(__file__).resolve().parents[1]
+            def run(args, **kwargs):
+                return subprocess.CompletedProcess(args, 0, stdout=json.dumps(data))
+            with patch.object(self.installer.shutil, "which", return_value="/bin/pipx"), patch.object(self.installer.subprocess, "run", side_effect=run) as running, patch.object(self.installer.venv, "EnvBuilder") as builder, patch.dict("os.environ", {"GOOGLE_MAPS_REVIEWS_CONFIG": str(settings)}), redirect_stdout(io.StringIO()):
+                for _ in range(2):
+                    self.assertEqual(self.installer.main(["--prefix", str(prefix), "--source", str(source), "--browser", "chrome"]), 0)
+                builder.assert_not_called()
+            self.assertTrue(command.is_symlink())
+            self.assertEqual(command.resolve(), target)
+            self.assertEqual(settings.read_text(encoding="utf-8"), '{"max":17}')
+            cached = prefix / "share/google-maps-reviews/pipx-source"
+            self.assertTrue((cached / "src/google_maps_reviews/extract_reviews.js").is_file())
+            self.assertFalse((cached / "web").exists())
+            installs = [call for call in running.call_args_list if call.args[0][1] == "install"]
+            self.assertEqual(len(installs), 2)
+            self.assertEqual(installs[0].args[0], ["/bin/pipx", "install", "--force", str(cached)])
+            self.assertEqual(installs[0].kwargs["env"]["PIPX_BIN_DIR"], str(command.parent))
+            self.assertEqual(running.call_args.args[0], [str(command), "setup", "--browser", "chrome"])
+
+    def test_foreign_or_unregistered_symlink_is_not_updated(self):
+        for invalid in ("wrong_target", "wrong_package", "missing_app", "invalid_json", "broken_link"):
+            with self.subTest(invalid=invalid), tempfile.TemporaryDirectory() as folder:
+                prefix = Path(folder)
+                command, target, data = self.pipx_fixture(prefix)
+                package = data["venvs"]["google-maps-reviews"]["metadata"]["main_package"]
+                if invalid == "wrong_target":
+                    package["app_paths"] = [str(prefix / "another-app")]
+                elif invalid == "wrong_package":
+                    package["package"] = "another-app"
+                elif invalid == "missing_app":
+                    package["apps"] = []
+                elif invalid == "broken_link":
+                    target.unlink()
+                result = subprocess.CompletedProcess([], 0, stdout="invalid" if invalid == "invalid_json" else json.dumps(data))
+                with patch.object(self.installer.shutil, "which", return_value="/bin/pipx"), patch.object(self.installer.subprocess, "run", return_value=result) as running, redirect_stderr(io.StringIO()):
+                    self.assertEqual(self.installer.main(["--prefix", str(prefix), "--source", str(Path(__file__).resolve().parents[1])]), 1)
+                self.assertTrue(command.is_symlink())
+                self.assertFalse((prefix / "share").exists())
+                self.assertTrue(all(call.args[0] == ["/bin/pipx", "list", "--json"] for call in running.call_args_list))
+
+    def test_pipx_source_cache_requires_matching_ownership(self):
+        with tempfile.TemporaryDirectory() as folder:
+            prefix = Path(folder)
+            _command, target, _data = self.pipx_fixture(prefix)
+            cached = prefix / "share/google-maps-reviews/pipx-source"
+            cached.mkdir(parents=True)
+            existing = cached / "keep.txt"
+            existing.write_text("keep", encoding="utf-8")
+            with patch.object(self.installer.subprocess, "run") as running, self.assertRaises(RuntimeError):
+                self.installer.install_with_pipx(Path(__file__).resolve().parents[1], (prefix, target, "/bin/pipx"), "chrome")
+            running.assert_not_called()
+            self.assertEqual(existing.read_text(encoding="utf-8"), "keep")
+
     def test_unrelated_command_and_virtual_environment_are_not_overwritten(self):
         with tempfile.TemporaryDirectory() as folder:
             prefix = Path(folder)
