@@ -19,6 +19,9 @@ from google_maps_reviews import cli, console
 
 class InstalledCliTest(unittest.TestCase):
     def setUp(self):
+        network = patch.object(cli, "build_opener", side_effect=OSError("単体テストでは収集サービスに接続しません"))
+        network.start()
+        self.addCleanup(network.stop)
         guard = patch.object(cli, "collection_browser", side_effect=AssertionError("単体テストから実ブラウザーを起動しません。ブラウザーを明示的にモックしてください。"))
         self.browser_guard = guard.start()
         self.addCleanup(guard.stop)
@@ -38,11 +41,26 @@ class InstalledCliTest(unittest.TestCase):
             self.assertFalse(cli.collect_from_local_service(args, {}, {}))
             opener.assert_not_called()
 
-    def test_default_collection_does_not_discover_a_legacy_service(self):
+    def test_default_collection_checks_legacy_service_and_falls_back_if_absent(self):
         args = cli.build_parser().parse_args(["https://maps.app.goo.gl/requested-store", "--all"])
-        with patch.object(cli, "build_opener") as opener:
+        with patch.object(cli, "build_opener", side_effect=OSError("service unavailable")) as opener:
             self.assertFalse(cli.collect_from_local_service(args, {}, {}))
-            opener.assert_not_called()
+            opener.assert_called_once()
+
+    def test_share_url_resolution_validates_redirects_and_place_identity(self):
+        resolved = "https://www.google.com/maps/place/Store/data=!1s0x123:0x456"
+        response = MagicMock()
+        response.__enter__.return_value.geturl.return_value = resolved
+        opener = MagicMock()
+        opener.open.return_value = response
+        with patch.object(cli, "build_opener", return_value=opener) as building:
+            self.assertEqual(cli.resolve_maps_url("https://maps.app.goo.gl/store"), resolved)
+            handler = building.call_args.args[1]
+            with self.assertRaises(cli.argparse.ArgumentTypeError):
+                handler.redirect_request(None, None, 302, "", {}, "http://127.0.0.1/private")
+            response.__enter__.return_value.geturl.return_value = "https://www.google.com/maps"
+            with self.assertRaisesRegex(ValueError, "対象店舗"):
+                cli.resolve_maps_url("https://maps.app.goo.gl/store")
 
     def test_unsupported_os_does_not_start_collection(self):
         with patch.object(sys, "platform", "linux"), patch.object(cli, "run_collection") as collecting, redirect_stderr(io.StringIO()):
@@ -282,16 +300,20 @@ class InstalledCliTest(unittest.TestCase):
 
 class LocalServiceCliTest(unittest.TestCase):
     def setUp(self):
+        network = patch.object(cli, "build_opener", side_effect=OSError("単体テストでは収集サービスに接続しません"))
+        network.start()
+        self.addCleanup(network.stop)
         guard = patch.object(cli, "collection_browser", side_effect=AssertionError("単体テストから実ブラウザーを起動しません。ブラウザーを明示的にモックしてください。"))
         self.browser_guard = guard.start()
         self.addCleanup(guard.stop)
 
-    def test_missing_service_opt_in_fails_without_launching_real_chrome(self):
+    def test_unavailable_service_falls_back_without_launching_real_chrome(self):
         with tempfile.TemporaryDirectory() as folder, patch.object(cli, "build_opener") as opener, \
                 patch("playwright.sync_api.sync_playwright"), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            opener.return_value.open.return_value = io.BytesIO(b"{}")
             self.assertEqual(cli.main(["https://www.google.com/maps/test", "--all", "--output-dir", folder]), 1)
             self.browser_guard.assert_called_once()
-            opener.assert_not_called()
+            opener.assert_called_once()
             self.assertEqual(list(Path(folder).iterdir()), [])
 
     def test_termination_exits_the_caller_instead_of_continuing_with_partial_data(self):
@@ -311,6 +333,37 @@ class LocalServiceCliTest(unittest.TestCase):
 
     def stream(self, events):
         return io.BytesIO(b"".join(b"data: " + json.dumps(event).encode() + b"\n\n" for event in events))
+
+    def test_period_uses_previous_browser_and_resolves_share_url_before_collecting(self):
+        resolved = "https://www.google.com/maps/place/Store/data=!1s0x123:0x456"
+        data = self.payload(2)
+        data["sourceUrl"] = resolved
+        for row in data["reviews"]:
+            row["date_text"] = "2026-09-01"
+        opener = MagicMock()
+        opener.open.side_effect = [io.BytesIO(b'{"ready":true,"version":"1.0.0","busy":false}'),
+                                   self.stream([{"type": "done", "data": data}])]
+        with tempfile.TemporaryDirectory() as folder, patch.object(cli, "build_opener", return_value=opener), patch.object(cli, "resolve_maps_url", return_value=resolved) as resolving, redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main(["https://maps.app.goo.gl/store", "--from", "2023-01-01", "--to", "2026-09-30", "--output-dir", folder]), 0)
+            metadata = json.loads(next(Path(folder).glob("*.json")).read_text())["metadata"]
+            self.assertEqual(metadata["scanned_count"], 2)
+            self.assertTrue(metadata["scan_coverage_verified"])
+            self.assertEqual(json.loads(opener.open.call_args.args[0].data)["url"], resolved)
+            self.assertEqual(metadata["requested_url"], "https://maps.app.goo.gl/store")
+            resolving.assert_called_once()
+            self.browser_guard.assert_not_called()
+
+    def test_another_places_service_result_is_rejected_before_merging(self):
+        requested = "https://www.google.com/maps/place/Store/data=!1s0x123:0x456"
+        data = self.payload(2)
+        data["sourceUrl"] = "https://www.google.com/maps/place/Other/data=!1s0x789:0xabc"
+        opener = MagicMock()
+        opener.open.side_effect = [io.BytesIO(b'{"ready":true,"version":"1.0.0","busy":false}'),
+                                   self.stream([{"type": "done", "data": data}])]
+        with tempfile.TemporaryDirectory() as folder, patch.object(cli, "build_opener", return_value=opener), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as errors:
+            self.assertEqual(cli.main([requested, "--all", "--output-dir", folder]), 1)
+            self.assertEqual(list(Path(folder).iterdir()), [])
+            self.assertIn("別施設", errors.getvalue())
 
     def test_all_reviews_from_service_are_exported_and_coverage_is_rechecked(self):
         events = [{"type": "status", "message": "収集開始"}, {"type": "progress", "data": self.payload(1)},

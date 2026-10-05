@@ -47,6 +47,7 @@ function mockCollectionPage(t: TestContext, options: {
   displayedTotal?: number | null;
   atEnd?: boolean;
   loadAfterWheels?: { wheels: number; reviews: Review[] };
+  contextManagementUnsupported?: boolean;
 }) {
   let now = 0;
   let opened = false;
@@ -115,9 +116,26 @@ function mockCollectionPage(t: TestContext, options: {
     async close() { closed.push('default-context'); },
   };
   const browser = { contexts: () => [context], async close() { closed.push('disconnect'); } } as unknown as Browser;
-  t.mock.method(chromium, 'connectOverCDP', async () => browser);
+  t.mock.method(chromium, 'connectOverCDP', async (_endpoint: string, connectOptions?: { noDefaults?: boolean }) => {
+    if (options.contextManagementUnsupported && !connectOptions?.noDefaults)
+      throw new Error('Protocol error (Browser.setDownloadBehavior): Browser context management is not supported.');
+    return browser;
+  });
   return { page, clicked, closed, elapsed: () => now };
 }
+
+test('既存Chromeがコンテキスト変更に非対応でも接続し、既存タブを閉じない', async (t) => {
+  const fixture = mockCollectionPage(t, {
+    entries: [{ role: 'tab', label: '口コミ' }], contextManagementUnsupported: true,
+  });
+  const events: CollectionEvent[] = [];
+  await collectReviews('https://www.google.com/maps/test', event => events.push(event), new AbortController().signal);
+  const done = events.at(-1);
+  assert.equal(done?.type, 'done');
+  if (done?.type !== 'done') assert.fail('完了イベントがありません');
+  assert.equal(done.data.verified, true);
+  assert.deepEqual(fixture.closed, ['collection-page', 'disconnect']);
+});
 
 test('総件数に一致したら末尾に未到達でも追加スクロールせず完了する', async (t) => {
   const fixture = mockCollectionPage(t, {

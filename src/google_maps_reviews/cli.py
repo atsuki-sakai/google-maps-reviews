@@ -14,7 +14,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
-from urllib.request import ProxyHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from . import __version__
 from .browser import collection_browser
@@ -71,6 +71,24 @@ def ensure_same_place(expected: str, actual: str):
     first, second = place_identity(expected), place_identity(actual)
     if first and second and first[0] == second[0] and first != second:
         raise ValueError("指定URLとは別施設の口コミ画面です。指定施設の口コミを開いて再実行してください。")
+
+
+def resolve_maps_url(value: str) -> str:
+    """Resolve a share link before opening an owned collection tab."""
+    if urlparse(value).hostname not in {"maps.app.goo.gl", "goo.gl"}:
+        return value
+
+    class MapsRedirects(HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            maps_url(newurl)
+            return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+    opener = build_opener(ProxyHandler({}), MapsRedirects())
+    with opener.open(Request(value), timeout=20) as response:
+        resolved = maps_url(response.geturl())
+    if place_identity(resolved) is None:
+        raise ValueError("共有URLから対象店舗を確認できません。店舗ページのURLを指定してください。")
+    return resolved
 
 
 def positive_int(value: str) -> int:
@@ -409,9 +427,9 @@ def build_parser():
     parser.add_argument("--output-dir", type=Path, default=Path.home() / "Desktop" / "GoogleMap口コミ")
     parser.add_argument("--browser", choices=("chrome", "chromium"), default="chrome")
     service = parser.add_mutually_exclusive_group()
-    service.add_argument("--no-service", action="store_true", help="CLIの専用ブラウザーで収集（既定）")
+    service.add_argument("--no-service", action="store_true", help="既存の収集サービスを使わずCLIの専用ブラウザーで収集")
     service.add_argument("--use-service", dest="no_service", action="store_false", help="互換用: 起動中の旧Web用収集サービスを使用")
-    parser.set_defaults(no_service=True)
+    parser.set_defaults(no_service=False)
     parser.add_argument("--demo", action="store_true", help="実在の口コミではないサンプルで出力確認")
     parser.add_argument("--interactive", action="store_true", help="対話メニューを開く（ターミナル専用）")
     parser.add_argument("--use-settings", action="store_true", help="保存設定を使用。明示したオプションを優先")
@@ -428,14 +446,14 @@ def main(argv=None) -> int:
 
 
 def collect_from_local_service(args, reviews: dict, metadata: dict) -> bool:
-    # Compatibility is explicit: never discover and use a development Web
-    # service for an ordinary CLI run or a report request.
-    if args.no_service or not args.url or not args.all or args.manual or args.visible_only or args.browser != "chrome" or args.delay != 2.0:
+    # Preserve the collection environment used by earlier installations. A
+    # fresh CLI installation works without this optional local service.
+    if args.no_service or not args.url or not (args.all or args.date_from or args.date_to) or args.manual or args.visible_only or args.browser != "chrome" or args.delay != 2.0:
         return False
     endpoint = "http://127.0.0.1:38473"
     headers = {"Origin": "https://google-maps-reviews.vercel.app"}
-    opener = build_opener(ProxyHandler({}))
     try:
+        opener = build_opener(ProxyHandler({}))
         with opener.open(Request(endpoint + "/health", headers=headers), timeout=1) as response:
             health = json.load(response)
         if health.get("ready") is not True or health.get("version") != "1.0.0":
@@ -447,8 +465,10 @@ def collect_from_local_service(args, reviews: dict, metadata: dict) -> bool:
     try:
         if health.get("busy"):
             raise RuntimeError("このMacでは口コミを収集中です。完了後に再実行してください。")
+        resolved = resolve_maps_url(args.url)
+        metadata["resolved_url"] = resolved
         print("このMacの専用Chromeで収集しています。", flush=True)
-        request = Request(endpoint + "/collect", data=json.dumps({"url": args.url, "timeout": args.timeout}).encode(),
+        request = Request(endpoint + "/collect", data=json.dumps({"url": resolved, "timeout": args.timeout}).encode(),
                           headers=dict(headers, **{"Content-Type": "application/json"}))
         with opener.open(request, timeout=args.timeout + 120) as response:
             for line in response:
@@ -463,6 +483,9 @@ def collect_from_local_service(args, reviews: dict, metadata: dict) -> bool:
                 if event["type"] not in {"progress", "done"}:
                     continue
                 data = event["data"]
+                ensure_same_place(resolved, data["sourceUrl"])
+                if place_identity(resolved) and place_identity(data["sourceUrl"]) != place_identity(resolved):
+                    raise ValueError("指定店舗と収集元の一致を確認できません。取得データは保存対象に追加しませんでした。")
                 merge_reviews(reviews, data["reviews"], data["place"], data["sourceUrl"])
                 metadata.update(place_name=data["place"], source_url=data["sourceUrl"],
                                 displayed_total_end=data["displayedTotal"])
@@ -545,6 +568,8 @@ def run_collection(args) -> int:
                     final_expansion_passes = 0
                     last_progress = None
                     recovery_attempted = False
+                    full_view_opened = False
+                    no_progress_passes = 0
                     while True:
                         if blocked(page):
                             metadata["stop_reason"] = "確認画面のため停止"
@@ -563,6 +588,7 @@ def run_collection(args) -> int:
                             metadata.setdefault("displayed_total_start", data["displayed_total"])
                             metadata["displayed_total_end"] = data["displayed_total"]
                         added = merge_reviews(reviews, data["reviews"], place, data["source_url"])
+                        no_progress_passes = 0 if added else no_progress_passes + 1
                         if data["reviews"] and not reviews:
                             raise RuntimeError("口コミは表示されていますが、投稿者または評価を読み取れません。ツールを更新してください。")
                         progress = (min(len(reviews), limit), metadata.get('displayed_total_end'))
@@ -587,7 +613,18 @@ def run_collection(args) -> int:
                         if time.monotonic() - started >= args.timeout:
                             metadata["stop_reason"] = "制限時間に到達"
                             break
-                        if reviews_restricted(page):
+                        if not data["reviews"]:
+                            raise RuntimeError("口コミカードを読み取れません。画面変更または未対応の表示形式です。")
+                        # The same entry can reappear at the bottom of the full
+                        # list. Clicking it repeatedly reloads the first page.
+                        if not full_view_opened and open_full_reviews(page):
+                            full_view_opened = True
+                            no_progress_passes = 0
+                            stagnant = 0
+                            continue
+                        # A notice alone does not prove loading is blocked.
+                        # First attempt the normal transition and scrolling.
+                        if no_progress_passes >= 3 and reviews_restricted(page):
                             if not recovery_attempted:
                                 recovery_attempted = True
                                 metadata["manual_recovery_attempted"] = True
@@ -598,14 +635,10 @@ def run_collection(args) -> int:
                                     ensure_same_place(expected_url, page.url)
                                     expanded_ids.clear()
                                     stagnant = 0
+                                    no_progress_passes = 0
                                     continue
                             login = "google-maps-reviews login" + (f" --browser {args.browser}" if args.browser != "chrome" else "")
                             raise RuntimeError(f"Googleマップの表示制限が残っています。取得済み分を保存します。専用ブラウザーのログインは {login} で確認できます。ログインしてもGoogle側の制限が残る場合は収集できません。")
-                        if not data["reviews"]:
-                            raise RuntimeError("口コミカードを読み取れません。画面変更または未対応の表示形式です。")
-                        if open_full_reviews(page):
-                            stagnant = 0
-                            continue
                         state = review_scroll_state(page)
                         stagnant = next_stagnant_count(stagnant, added, state)
                         if stagnant >= 8 and metadata.get("displayed_total_end") is None:

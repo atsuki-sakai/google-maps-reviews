@@ -79,7 +79,7 @@ export async function collectReviews(url: string, emit: (event: CollectionEvent)
     if (cancelled) throw new PublicCollectionError('収集を中止しました。');
     emit({ type: 'status', message: 'Googleマップの店舗ページを開いています。' });
     if (cdpUrl) {
-      browser = await playwright.connectOverCDP(cdpUrl, { timeout: 25000 });
+      browser = await playwright.connectOverCDP(cdpUrl, { timeout: 25000, noDefaults: true });
     } else if (process.platform === 'linux') {
       browser = await playwright.launch({ executablePath: await chromium.executablePath(), args: chromium.args });
     } else {

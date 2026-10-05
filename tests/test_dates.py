@@ -15,6 +15,11 @@ from google_maps_reviews.dates import date_bounds, iso_date, select_period
 
 
 class DateRangeTest(unittest.TestCase):
+    def setUp(self):
+        network = patch.object(cli, "build_opener", side_effect=OSError("単体テストでは収集サービスに接続しません"))
+        network.start()
+        self.addCleanup(network.stop)
+
     def test_relative_labels_remain_ranges_and_edited_dates_are_unknown(self):
         today = date(2026, 10, 6)
         for text in ("5 か月前", "a month ago", "2 years ago", "3 日前", "1週間前"):
@@ -145,8 +150,19 @@ class DateRangeTest(unittest.TestCase):
                                       "displayed_total": expected, "reviews": reviews[:count]} for count in counts]
         return page, MagicMock(pages=[page])
 
+    def test_banner_does_not_interrupt_loading_and_full_list_is_opened_only_once(self):
+        page, context = self.restriction_fixture([5, 5, 10, 15], expected=15)
+        with tempfile.TemporaryDirectory() as folder, patch("playwright.sync_api.sync_playwright"), patch.object(cli, "collection_browser") as launch, patch.object(cli, "prepare_reviews"), patch.object(cli, "expand_text"), patch.object(cli, "blocked", return_value=False), patch.object(cli, "reviews_restricted", return_value=True), patch.object(cli, "recover_restricted_reviews", side_effect=AssertionError("読み込み中に操作を要求しました")) as restoring, patch.object(cli, "open_full_reviews", side_effect=[True, AssertionError("全口コミを再度開きました")]) as opening, patch.object(cli, "review_scroll_state", return_value={"at_end": False}), patch.object(cli, "scroll_reviews"), patch.object(cli.time, "sleep"), redirect_stdout(io.StringIO()):
+            launch.return_value.__enter__.return_value = context
+            self.assertEqual(cli.main([page.url, "--all", "--output-dir", folder]), 0)
+            data = json.loads(next(Path(folder).glob("*.json")).read_text())
+            self.assertEqual(len(data["reviews"]), 15)
+            self.assertTrue(data["metadata"]["full_coverage_verified"])
+            opening.assert_called_once()
+            restoring.assert_not_called()
+
     def test_login_resume_keeps_collected_rows_and_excludes_manual_wait_from_timeout(self):
-        page, context = self.restriction_fixture([5, 8, 10])
+        page, context = self.restriction_fixture([5, 5, 5, 5, 8, 10])
         clock = [100.0]
         def recover(_page):
             clock[0] += 600  # Longer than the two-second collection timeout.
@@ -162,8 +178,8 @@ class DateRangeTest(unittest.TestCase):
             restoring.assert_called_once()
 
     def test_restriction_after_resume_saves_partial_once_and_returns_two(self):
-        page, context = self.restriction_fixture([5, 5])
-        with tempfile.TemporaryDirectory() as folder, patch("playwright.sync_api.sync_playwright"), patch.object(cli, "collection_browser") as launch, patch.object(cli, "prepare_reviews"), patch.object(cli, "expand_text"), patch.object(cli, "blocked", return_value=False), patch.object(cli, "reviews_restricted", return_value=True), patch.object(cli, "recover_restricted_reviews", return_value=True) as restoring, redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+        page, context = self.restriction_fixture([5] * 8)
+        with tempfile.TemporaryDirectory() as folder, patch("playwright.sync_api.sync_playwright"), patch.object(cli, "collection_browser") as launch, patch.object(cli, "prepare_reviews"), patch.object(cli, "expand_text"), patch.object(cli, "blocked", return_value=False), patch.object(cli, "open_full_reviews", return_value=False), patch.object(cli, "review_scroll_state", return_value={"at_end": False}), patch.object(cli, "scroll_reviews"), patch.object(cli.time, "sleep"), patch.object(cli, "reviews_restricted", return_value=True), patch.object(cli, "recover_restricted_reviews", return_value=True) as restoring, redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             launch.return_value.__enter__.return_value = context
             self.assertEqual(cli.main([page.url, "--all", "--output-dir", folder]), 2)
             data = json.loads(next(Path(folder).glob("*.json")).read_text())
@@ -184,16 +200,16 @@ class DateRangeTest(unittest.TestCase):
             page.reload.assert_called_once()
 
     def test_switching_places_during_login_never_merges_the_other_store(self):
-        page, context = self.restriction_fixture([5])
+        page, context = self.restriction_fixture([5] * 4)
         def recover(_page):
             page.url = "https://www.google.com/maps/place/Other/data=!1s0x789:0xabc"
             return True
-        with tempfile.TemporaryDirectory() as folder, patch("playwright.sync_api.sync_playwright"), patch.object(cli, "collection_browser") as launch, patch.object(cli, "prepare_reviews"), patch.object(cli, "expand_text"), patch.object(cli, "blocked", return_value=False), patch.object(cli, "reviews_restricted", return_value=True), patch.object(cli, "recover_restricted_reviews", side_effect=recover), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+        with tempfile.TemporaryDirectory() as folder, patch("playwright.sync_api.sync_playwright"), patch.object(cli, "collection_browser") as launch, patch.object(cli, "prepare_reviews"), patch.object(cli, "expand_text"), patch.object(cli, "blocked", return_value=False), patch.object(cli, "open_full_reviews", return_value=False), patch.object(cli, "review_scroll_state", return_value={"at_end": False}), patch.object(cli, "scroll_reviews"), patch.object(cli.time, "sleep"), patch.object(cli, "reviews_restricted", return_value=True), patch.object(cli, "recover_restricted_reviews", side_effect=recover), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             launch.return_value.__enter__.return_value = context
             self.assertEqual(cli.main([page.url, "--all", "--output-dir", folder]), 2)
             data = json.loads(next(Path(folder).glob("*.json")).read_text())
             self.assertIn("別施設", data["metadata"]["error"])
-            self.assertEqual(page.evaluate.call_count, 1)
+            self.assertEqual(page.evaluate.call_count, 4)
 
 
 if __name__ == "__main__":
