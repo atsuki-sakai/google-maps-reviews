@@ -20,5 +20,5 @@ if [[ ! -f node_modules/tsx/dist/cli.mjs ]]; then
   npm ci
 fi
 "$node_path" scripts/install-local-collector.mjs install
-print '専用ChromeでGoogleへログインしてください。通常のChromeとは別の収集用画面です。'
+print '専用ChromeでGoogleマップを確認し、ログインを求められる場合はログインしてください。'
 read '?Enterで閉じます（収集サービスは動作を続けます）: '

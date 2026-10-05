@@ -34,11 +34,28 @@ if (command === 'stop' || command === 'uninstall') {
 <key>StandardErrorPath</key><string>${xml(join(logs, 'collector-error.log'))}</string>
 </dict></plist>
 `, { mode: 0o600 });
-  ctl('bootout', `${domain}/${label}`);
-  const status = ctl('bootstrap', domain, agentFile);
+  // bootout returns before the old service and Chrome finish shutting down.
+  if (ctl('bootout', `${domain}/${label}`) === 0) await new Promise(resolve => setTimeout(resolve, 1500));
+  let status;
+  for (let attempt = 0; attempt < 12; attempt++) {
+    status = ctl('bootstrap', domain, agentFile);
+    if (status === 0) break;
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
   if (status !== 0) throw new Error('自動起動を設定できませんでした。npm run collectorで起動できます。');
+  let ready = false;
+  for (let attempt = 0; attempt < 30; attempt++) {
+    try {
+      const response = await fetch('http://127.0.0.1:38473/health', {
+        headers: { Origin: 'https://google-maps-reviews.vercel.app' }, signal: AbortSignal.timeout(1000),
+      });
+      if (response.ok && (await response.json()).ready === true) { ready = true; break; }
+    } catch { /* The service may still be starting. */ }
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
+  if (!ready) throw new Error('専用Chromeを起動できませんでした。Review Port用Chromeを閉じてから、もう一度起動してください。');
   console.log('収集サービスを設定しました。次回のMacログイン時にも自動起動します。');
-  console.log('開いた専用ChromeでGoogleにログインした後、https://google-maps-reviews.vercel.app/ を使ってください。');
+  console.log('Google Chromeで https://google-maps-reviews.vercel.app/ を開き、「このMacと接続」を押してください。');
 } else {
   throw new Error('install / start / stop / uninstallを指定してください。');
 }
