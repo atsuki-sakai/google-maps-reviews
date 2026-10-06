@@ -54,12 +54,15 @@ class ReviewsTest(unittest.TestCase):
             original = json.loads(files[2].read_text(encoding="utf-8"))
             self.assertEqual(original["reviews"][0]["text"], body)
             book = load_workbook(files[1])
-            self.assertEqual(book.sheetnames, ["口コミ", "取得情報"])
+            self.assertEqual(book.sheetnames, ["取得情報", "口コミ", "長文の続き"])
             self.assertEqual(book["口コミ"]["C2"].value, 4)
             self.assertEqual(book["口コミ"]["F2"].value, "返信\n2行目")
             self.assertEqual(book["口コミ"]["E2"].data_type, "s")
             self.assertEqual(len(book["口コミ"]["E2"].value), 32767)
             self.assertNotIn("\x01", book["口コミ"]["E2"].value)
+            full_text = "".join(row[4] for row in book["長文の続き"].iter_rows(min_row=2, values_only=True)
+                                if row[0] == "口コミ" and row[1] == "E2")
+            self.assertEqual(full_text, body.replace("\x01", ""))
             self.assertFalse(any(cell.data_type == "f" for sheet in book for row in sheet for cell in row))
 
     def test_google_maps_urls_only(self):

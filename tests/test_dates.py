@@ -125,7 +125,7 @@ class DateRangeTest(unittest.TestCase):
             with next(Path(folder).glob("*.csv")).open(encoding="utf-8-sig", newline="") as stream:
                 self.assertEqual(len(list(csv.DictReader(stream))), 2)
             book = load_workbook(next(Path(folder).glob("*.xlsx")))
-            self.assertEqual(book.sheetnames, ["口コミ", "期間境界・日付不明", "期間外", "取得情報"])
+            self.assertEqual(book.sheetnames, ["取得情報", "口コミ", "期間境界・日付不明", "期間外"])
             self.assertEqual(book["期間外"]["G2"].value, "2")
             self.assertEqual(book["期間外"]["E2"].value, reviews[2]["text"])
             self.assertEqual(book["期間外"]["E2"].data_type, "s")

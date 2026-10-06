@@ -147,13 +147,6 @@ def has_review_text(row: dict) -> bool:
 
 
 def export_reviews(rows: list[dict], metadata: dict, output_dir: Path, stem: str) -> list[Path]:
-    from openpyxl import Workbook
-    from openpyxl.styles import Alignment, Font, PatternFill
-    from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
-
-    def spreadsheet_value(value):
-        return ILLEGAL_CHARACTERS_RE.sub("", value)[:32767] if isinstance(value, str) else value
-
     if metadata.get("review_filter") == "text_only":
         groups = (rows, metadata.get("period_uncertain_reviews", []), metadata.get("period_excluded_reviews", []))
         if any(not has_review_text(row) for group in groups for row in group):
@@ -175,44 +168,34 @@ def export_reviews(rows: list[dict], metadata: dict, output_dir: Path, stem: str
         writer.writerow([title for _, title in FIELDS])
         for row in rows:
             writer.writerow([csv_text(row.get(key, "")) for key, _ in FIELDS])
+    write_review_excel(snapshot, xlsx_path)
+    return [csv_path, xlsx_path, json_path]
+
+
+def write_review_excel(snapshot: dict, path: Path):
+    """Format a collected snapshot without collecting or rewriting its evidence."""
+    from openpyxl import Workbook
+    from openpyxl.comments import Comment
+    from openpyxl.styles import Font
+    from .excel import OVERFLOW_SHEET, write_table
+
+    metadata = snapshot["metadata"]
     book = Workbook()
-    sheet = book.active
-    sheet.title = "口コミ"
-    sheet.append([title for _, title in FIELDS])
-    for row in rows:
-        sheet.append([spreadsheet_value(row.get(key, "")) for key, _ in FIELDS])
-    sheet.freeze_panes = "A2"
-    sheet.auto_filter.ref = sheet.dimensions
-    widths = [26, 22, 10, 24, 70, 55, 26, 30, 30, 35, 30, 16, 65, 28, 28, 35, 35]
-    for column, width in zip("ABCDEFGHIJKLMNOPQ", widths):
-        sheet.column_dimensions[column].width = width
-    for cell in sheet[1]:
-        cell.fill = PatternFill("solid", fgColor="203864")
-        cell.font = Font(name="Arial", color="FFFFFF", bold=True)
-    for row in sheet.iter_rows(min_row=2):
-        for cell in row:
-            if isinstance(cell.value, str):
-                cell.value = ILLEGAL_CHARACTERS_RE.sub("", cell.value)[:32767]
-                cell.data_type = "s"
-            cell.font = Font(name="Arial", size=11)
-            cell.alignment = Alignment(vertical="top", wrap_text=True)
-        sheet.row_dimensions[row[0].row].height = 75
-    for key, title in (("uncertain_reviews", "期間境界・日付不明"), ("excluded_reviews", "期間外")):
-        if not snapshot.get(key):
+    book.remove(book.active)
+    widths = [20, 18, 8, 20, 72, 40, 26, 30, 30, 35, 28, 16, 65, 22, 22, 32, 20]
+    hidden = {1, *range(7, 17)}
+    if not metadata.get("date_from") and not metadata.get("date_to"):
+        hidden.add(17)
+    for key, title in (("reviews", "口コミ"), ("uncertain_reviews", "期間境界・日付不明"), ("excluded_reviews", "期間外")):
+        if key != "reviews" and not snapshot.get(key):
             continue
-        uncertain = book.copy_worksheet(sheet)
-        uncertain.title = title
-        if uncertain.max_row > 1:
-            uncertain.delete_rows(2, uncertain.max_row - 1)
-        for review in snapshot[key]:
-            uncertain.append([spreadsheet_value(review.get(key, "")) for key, _ in FIELDS])
-        for row in uncertain.iter_rows(min_row=2):
-            for cell in row:
-                if isinstance(cell.value, str):
-                    cell.data_type = "s"
-        uncertain.auto_filter.ref = uncertain.dimensions
-    summary = book.create_sheet("取得情報")
-    summary.append(["項目", "内容"])
+        sheet = write_table(book, title, [title for _, title in FIELDS],
+                            ([review.get(field, "") for field, _ in FIELDS] for review in snapshot.get(key, [])),
+                            widths=widths, hidden_columns=hidden, freeze_panes="E2",
+                            print_columns=(2, 17 if 17 not in hidden else 6))
+        sheet.sheet_properties.tabColor = "B7791F" if key == "uncertain_reviews" else "64748B" if key == "excluded_reviews" else "243B53"
+        sheet["E1"].comment = Comment(
+            "本文は原文を保持しています。行高の上限を超える長文は「長文の続き」シートでも全文を読めます。非表示の確認用列にはID・URL・日付の推定範囲を残しています。", "google-maps-reviews")
     labels = {
         "place_name": "店舗名", "source_url": "取得元URL", "collected_at": "取得日時",
         "count": "保存件数", "stop_reason": "停止理由", "requested_max": "指定した最大件数",
@@ -231,23 +214,43 @@ def export_reviews(rows: list[dict], metadata: dict, output_dir: Path, stem: str
         "period_exact_date_count": "日付表示の読取件数", "period_estimated_date_count": "相対表示から推定した読取件数",
         "period_unknown_date_count": "投稿日不明の読取件数",
         "period_uncertain_count": "期間境界・日付不明件数", "period_excluded_count": "期間外件数", "date_filter_method": "日付の判定方法",
+        "requested_url": "指定URL", "resolved_url": "共有URLの解決先", "collector": "収集方法",
+        "service_verified": "収集サービスによる一覧照合", "manual_recovery_attempted": "画面操作による再開",
     }
-    for key, value in metadata.items():
-        summary.append([labels.get(key, key), spreadsheet_value(str(value))])
-    summary.append(["保存対象", "口コミ本文のある投稿のみ。評価のみ・空白本文・店舗返信のみは保存しません。一覧の件数照合には評価のみも含めます。"])
-    summary.append(["投稿日", "画面表記を保存。期間指定では相対表示を日付の範囲として推定。本文ありを期間内・要確認・期間外へ区分して保存します。正確な投稿日を保証しません。"])
-    summary.append(["本文と返信", "画面に表示されたテキスト。翻訳や省略が含まれる場合があります。"])
-    summary.append(["CSV", "Excelで数式扱いされる文字列の先頭にアポストロフィを付けています。元データはJSONに保存。"])
-    summary.append(["長い本文", "Excelは1セル32,767文字まで。超過分と制御文字はCSV・JSONに保存されています。"])
-    summary.column_dimensions["A"].width = 28
-    summary.column_dimensions["B"].width = 100
-    for row in summary:
-        for cell in row:
-            cell.data_type = "s"
-            cell.font = Font(name="Arial", size=11)
-            cell.alignment = Alignment(wrap_text=True, vertical="top")
-    book.save(xlsx_path)
-    return [csv_path, xlsx_path, json_path]
+    priority = ["place_name", "collected_at", "review_filter", "count", "scanned_text_review_count",
+                "excluded_rating_only_count", "scanned_count", "displayed_total_end", "missing_count",
+                "date_from", "date_to", "period_uncertain_count", "period_excluded_count",
+                "scan_coverage_verified", "full_coverage_verified", "period_date_accuracy_verified",
+                "saved_text_truncated_count", "incomplete", "stop_reason"]
+    keys = [key for key in priority if key in metadata] + [key for key in metadata if key not in priority]
+    entries = []
+    for key in keys:
+        value = metadata[key]
+        if key == "review_filter" and value == "text_only":
+            value = "本文ありの口コミのみ"
+        elif isinstance(value, bool):
+            value = ("要確認" if value else "なし") if key == "incomplete" else ("確認済み" if value else "未確認") if "verified" in key else ("はい" if value else "いいえ")
+        elif value is None:
+            value = "未確認"
+        entries.append([labels.get(key, key), value])
+    entries += [
+        ["保存対象の説明", "口コミ本文のある投稿のみ。一覧の件数照合には評価のみも含めます。"],
+        ["投稿日", "画面表記を保存。期間指定では相対表示を日付の範囲として推定し、期間内・要確認・期間外に分類します。正確な投稿日を保証しません。"],
+        ["本文と返信", "画面に表示されたテキスト。Googleの翻訳や省略が含まれる場合があります。"],
+        ["表示と確認用列", "口コミシートは投稿者・星評価・投稿日・本文・既存返信を表示します。非表示列のID・URL・日付推定は、必要なときに列を再表示して確認できます。"],
+        ["長文の読み方", "行高の上限を超える本文・返信は「長文の続き」に分割して表示します。元シート・元セル・続き番号でたどれます。"],
+        ["原本", "CSV・JSONに収集時のデータを保存しています。Excelの1セル上限は32,767文字。表示する長文は分割シートに全文を残します。制御文字はExcelから除き、原本に保持します。"],
+    ]
+    summary = write_table(book, "取得情報", ["項目", "内容"], entries, widths=[38, 88])
+    summary.auto_filter.ref = None
+    summary["B2"].font = Font(name="Arial", size=14, bold=True, color="243B53")
+    summary.row_dimensions[2].height = max(36, summary.row_dimensions[2].height)
+    book.move_sheet(summary, offset=-book.worksheets.index(summary))
+    if OVERFLOW_SHEET in book.sheetnames:
+        detail = book[OVERFLOW_SHEET]
+        book.move_sheet(detail, offset=len(book.worksheets) - book.worksheets.index(detail) - 1)
+    book.active = 0
+    book.save(path)
 
 
 def prepare_reviews(page, manual: bool):

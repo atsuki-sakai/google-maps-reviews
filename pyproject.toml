@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "google-maps-reviews"
-version = "0.7.0"
+version = "0.7.1"
 description = "Mac専用のGoogleマップ口コミ収集CLIと口コミCSVの分析Skill。"
 license = "MIT"
 license-files = ["LICENSE"]
 classifiers = ["Operating System :: MacOS :: MacOS X", "Programming Language :: Python :: 3", "Environment :: Console"]
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["playwright>=1.49,<2", "openpyxl>=3.1,<4"]
+dependencies = ["playwright>=1.49,<2", "openpyxl>=3.1,<4", "lxml>=6,<7"]
 
 [project.scripts]
 google-maps-reviews = "google_maps_reviews.cli:main"

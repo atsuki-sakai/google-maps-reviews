@@ -15,11 +15,12 @@ from datetime import datetime
 from pathlib import Path
 
 from openpyxl import Workbook
-from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.styles import PatternFill
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 
 from . import __version__
+from .excel import write_table
 
 CATEGORIES = {
     "quality": "商品・料理・施術の品質", "service": "接客・スタッフ",
@@ -401,37 +402,29 @@ def statistics(manifest: dict, rows: list[dict]) -> dict:
 
 
 def write_sheet(book: Workbook, name: str, headers: list[str], rows):
-    sheet = book.create_sheet(name)
-    sheet.append(headers)
-    for row in rows:
-        sheet.append(row)
-    sheet.freeze_panes = "A2"
-    sheet.auto_filter.ref = sheet.dimensions
-    sheet.sheet_view.zoomScale = 85
-    sheet.row_dimensions[1].height = 36
-    for column, header in enumerate(headers, 1):
-        width = 60 if any(word in header for word in ("本文", "引用", "解釈", "内容", "要約", "理由", "仮説", "確認方法", "機会", "返信案")) else 28 if any(word in header for word in ("URL", "日時", "日付", "カテゴリ", "口コミID")) else 18
-        sheet.column_dimensions[get_column_letter(column)].width = width
-    for row in sheet:
-        if row[0].row > 1:
-            lines = max((len(str(cell.value or "")) * 2 // sheet.column_dimensions[cell.column_letter].width + 1 for cell in row), default=1)
-            sheet.row_dimensions[row[0].row].height = min(150, max(30, lines * 15))
-        for cell in row:
-            # Original review/model strings are literal Excel text, including
-            # leading '='. Preserve text without allowing formula execution.
-            if isinstance(cell.value, str):
-                cell.data_type = "s"
-            cell.font = Font(name="Arial", size=10, color="253444")
-            cell.alignment = Alignment(vertical="top", wrap_text=True)
-            if cell.row == 1:
-                cell.font = Font(name="Arial", size=10, bold=True, color="FFFFFF")
-                cell.fill = PatternFill("solid", fgColor="263F52")
-            elif cell.row % 2 == 0:
-                cell.fill = PatternFill("solid", fgColor="F2F5F7")
-            if cell.row > 1 and isinstance(cell.value, float):
-                cell.number_format = "0.00"
+    # Preserve the data columns and keys, while keeping technical identifiers
+    # available through Excel's "再表示" instead of occupying the main view.
+    layouts = {
+        "概要": {"widths": [26, 100]},
+        "分類済み口コミ": {
+            "widths": [12, 30, 20, 7, 18, 64, 14, 28, 50, 10, 34, 50, 25, 18, 18, 16, 20],
+            "hidden_columns": (2, 13, 14, 15, 16), "freeze_panes": "D2", "print_columns": (1, 11),
+        },
+        "話題別根拠": {
+            "widths": [12, 30, 28, 12, 64, 64], "hidden_columns": (2,), "freeze_panes": "E2",
+        },
+        "返信案": {
+            "widths": [12, 30, 20, 7, 64, 36, 50, 12, 64, 28], "hidden_columns": (2,), "freeze_panes": "E2",
+        },
+        "カテゴリ集計": {"widths": [34, 16, 24, 10, 10, 12, 10, 18, 16], "freeze_panes": "B2"},
+        "改善アクション": {
+            "widths": [14, 32, 64, 10, 44, 18, 20, 16, 32, 26, 32, 30, 26], "freeze_panes": "C2",
+        },
+        "分析と提案": {"widths": [16, 30, 60, 52, 48, 52, 44, 48, 30], "freeze_panes": "C2"},
+    }
+    sheet = write_table(book, name, headers, rows, **layouts.get(name, {}))
     if name == "改善アクション" and sheet.max_row > 1:
-        column = get_column_letter(sheet.max_column)
+        column = get_column_letter(headers.index("状態") + 1)
         states = DataValidation(type="list", formula1='"未着手・事業者確認,進行中,完了,保留"')
         sheet.add_data_validation(states)
         states.add(f"{column}2:{column}{sheet.max_row}")

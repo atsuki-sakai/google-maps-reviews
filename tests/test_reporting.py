@@ -145,7 +145,7 @@ class ReportingTest(unittest.TestCase):
         self.assertEqual(sheet["I2"].value, "=FORMULA()")
         self.assertEqual(sheet["C2"].data_type, "s")
         self.assertEqual(sheet["I2"].data_type, "s")
-        self.assertEqual(sheet.freeze_panes, "A2")
+        self.assertEqual(sheet.freeze_panes, "D2")
         self.assertEqual(sheet.auto_filter.ref, "A1:Q4")
         self.assertEqual(book["返信案"].max_row, 4)
         self.assertEqual(book["カテゴリ集計"]["B2"].data_type, "n")
