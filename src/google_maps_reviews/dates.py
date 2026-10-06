@@ -73,13 +73,12 @@ def date_bounds(text: str, anchor: date) -> tuple[date | None, date | None, str]
         return None, None, "日付不明"
 
 
-def select_period(rows: list[dict], start: str | None, end: str | None, anchor: date):
+def partition_period(rows: list[dict], start: str | None, end: str | None, anchor: date):
     lower_filter = date.fromisoformat(start) if start else date.min
     upper_filter = date.fromisoformat(end) if end else anchor
     if lower_filter > upper_filter:
         raise ValueError("開始日は終了日以前を指定してください。")
-    selected, uncertain = [], []
-    excluded = 0
+    selected, uncertain, excluded = [], [], []
     for original in rows:
         row = dict(original)
         lower, upper, precision = date_bounds(row.get("date_text", ""), anchor)
@@ -89,7 +88,8 @@ def select_period(rows: list[dict], start: str | None, end: str | None, anchor: 
             row["period_match"] = "日付不明"
             uncertain.append(row)
         elif upper < lower_filter or lower > upper_filter:
-            excluded += 1
+            row["period_match"] = "期間外（日付範囲による判定）"
+            excluded.append(row)
         elif lower >= lower_filter and upper <= upper_filter:
             row["period_match"] = "期間内（日付範囲による判定）"
             selected.append(row)
@@ -97,3 +97,9 @@ def select_period(rows: list[dict], start: str | None, end: str | None, anchor: 
             row["period_match"] = "期間境界・要確認"
             uncertain.append(row)
     return selected, uncertain, excluded
+
+
+def select_period(rows: list[dict], start: str | None, end: str | None, anchor: date):
+    """Keep the count-based interface while exports retain excluded rows."""
+    selected, uncertain, excluded = partition_period(rows, start, end, anchor)
+    return selected, uncertain, len(excluded)

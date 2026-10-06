@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 
 from openpyxl import load_workbook
 from google_maps_reviews import cli, console
-from google_maps_reviews.dates import date_bounds, iso_date, select_period
+from google_maps_reviews.dates import date_bounds, iso_date, partition_period, select_period
 
 
 class DateRangeTest(unittest.TestCase):
@@ -96,24 +96,62 @@ class DateRangeTest(unittest.TestCase):
         page = MagicMock(url="https://www.google.com/maps/test")
         reviews = [{"review_id": str(i), "author": "架空", "rating": 4, "text": "", "date_text": text} for i, text in enumerate(
             ("2026-09-01", "2026-09-30", "2026-08-31", "最終編集: 1 年前"))]
+        reviews[2]["text"] = '=HYPERLINK("https://example.com")'
         page.evaluate.return_value = {"place_name": "テスト", "source_url": page.url, "displayed_total": 4, "reviews": reviews}
         context = MagicMock(pages=[page])
-        with tempfile.TemporaryDirectory() as folder, patch("playwright.sync_api.sync_playwright"), patch.object(cli, "collection_browser") as launch, patch.object(cli, "prepare_reviews"), patch.object(cli, "expand_text"), patch.object(cli, "blocked", return_value=False), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+        with tempfile.TemporaryDirectory() as folder, patch("playwright.sync_api.sync_playwright"), patch.object(cli, "collection_browser") as launch, patch.object(cli, "prepare_reviews"), patch.object(cli, "expand_text"), patch.object(cli, "blocked", return_value=False), redirect_stdout(io.StringIO()) as output, redirect_stderr(io.StringIO()):
             launch.return_value.__enter__.return_value = context
             code = cli.main([page.url, "--from", "2026-09-01", "--to", "2026-09-30", "--output-dir", folder])
             self.assertEqual(code, 2)
             data = json.loads(next(Path(folder).glob("*.json")).read_text())
             self.assertEqual(len(data["reviews"]), 2)
             self.assertEqual(len(data["uncertain_reviews"]), 1)
+            self.assertEqual([row["review_id"] for row in data["excluded_reviews"]], ["2"])
+            self.assertEqual(data["excluded_reviews"][0]["text"], reviews[2]["text"])
+            exported = data["reviews"] + data["uncertain_reviews"] + data["excluded_reviews"]
+            self.assertEqual(len(exported), 4)
+            self.assertEqual({row["review_id"] for row in exported}, {"0", "1", "2", "3"})
             self.assertEqual(data["metadata"]["scanned_count"], 4)
             self.assertEqual(data["metadata"]["missing_count"], 0)
             self.assertTrue(data["metadata"]["scan_coverage_verified"])
             self.assertFalse(data["metadata"]["full_coverage_verified"])
+            self.assertFalse(data["metadata"]["period_date_accuracy_verified"])
+            self.assertNotIn("保存件数が一致", output.getvalue())
+            self.assertIn("一覧読取: 4件", output.getvalue())
+            self.assertIn("期間外: 1件", output.getvalue())
             with next(Path(folder).glob("*.csv")).open(encoding="utf-8-sig", newline="") as stream:
                 self.assertEqual(len(list(csv.DictReader(stream))), 2)
             book = load_workbook(next(Path(folder).glob("*.xlsx")))
-            self.assertEqual(book.sheetnames, ["口コミ", "期間境界・日付不明", "取得情報"])
+            self.assertEqual(book.sheetnames, ["口コミ", "期間境界・日付不明", "期間外", "取得情報"])
+            self.assertEqual(book["期間外"]["G2"].value, "2")
+            self.assertEqual(book["期間外"]["E2"].value, reviews[2]["text"])
+            self.assertEqual(book["期間外"]["E2"].data_type, "s")
             book.close()
+
+    def test_excluded_rows_keep_dates_and_period_reason_without_mutating_input(self):
+        original = [{"review_id": "old", "date_text": "2020-01-01"},
+                    {"review_id": "recent", "date_text": "2026-10-01"}]
+        selected, uncertain, excluded = partition_period(original, "2023-01-01", "2026-09-30", date(2026, 10, 6))
+        self.assertEqual((selected, uncertain), ([], []))
+        self.assertEqual([row["review_id"] for row in excluded], ["old", "recent"])
+        self.assertEqual(excluded[1]["date_earliest"], "2026-10-01")
+        self.assertIn("期間外", excluded[0]["period_match"])
+        self.assertNotIn("period_match", original[0])
+
+    def test_relative_dates_without_boundary_rows_still_do_not_claim_exact_period_success(self):
+        page, context = self.restriction_fixture([1], expected=1)
+        with tempfile.TemporaryDirectory() as folder, patch("playwright.sync_api.sync_playwright"), patch.object(cli, "collection_browser") as launch, patch.object(cli, "prepare_reviews"), patch.object(cli, "expand_text"), patch.object(cli, "blocked", return_value=False), redirect_stdout(io.StringIO()) as output, redirect_stderr(io.StringIO()) as errors:
+            launch.return_value.__enter__.return_value = context
+            code = cli.main([page.url, "--from", "2023-01-01", "--to", "2026-09-30", "--output-dir", folder])
+            metadata = json.loads(next(Path(folder).glob("*.json")).read_text())["metadata"]
+            self.assertEqual(code, 2)
+            self.assertTrue(metadata["scan_coverage_verified"])
+            self.assertTrue(metadata["period_selection_verified"])
+            self.assertFalse(metadata["period_date_accuracy_verified"])
+            self.assertEqual(metadata["period_uncertain_count"], 0)
+            self.assertEqual(metadata["period_estimated_date_count"], 1)
+            self.assertIn("期間内と推定: 1件", output.getvalue())
+            self.assertIn("正確な投稿日による期間抽出は未確認", errors.getvalue())
 
     def test_empty_period_result_still_saves_valid_files_after_scan(self):
         selected, uncertain, excluded = select_period([{"date_text": "2020-01-01"}], "2026-01-01", "2026-09-30", date(2026, 10, 6))

@@ -18,7 +18,7 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 
 from . import __version__
 from .browser import collection_browser
-from .dates import iso_date, select_period
+from .dates import iso_date, partition_period, select_period
 
 ROOT = Path(__file__).resolve().parent
 REVIEW_CARD_SELECTOR = '[data-review-id]:not([data-review-id] [data-review-id])'
@@ -155,8 +155,10 @@ def export_reviews(rows: list[dict], metadata: dict, output_dir: Path, stem: str
     tmp_json = json_path.with_suffix(".json.tmp")
     metadata = dict(metadata)
     snapshot = {"metadata": metadata, "reviews": rows}
-    if "period_uncertain_reviews" in metadata:
-        snapshot["uncertain_reviews"] = metadata.pop("period_uncertain_reviews")
+    for group in ("uncertain", "excluded"):
+        key = f"period_{group}_reviews"
+        if key in metadata:
+            snapshot[f"{group}_reviews"] = metadata.pop(key)
     tmp_json.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp_json.replace(json_path)
     with csv_path.open("w", encoding="utf-8-sig", newline="") as file:
@@ -186,12 +188,14 @@ def export_reviews(rows: list[dict], metadata: dict, output_dir: Path, stem: str
             cell.font = Font(name="Arial", size=11)
             cell.alignment = Alignment(vertical="top", wrap_text=True)
         sheet.row_dimensions[row[0].row].height = 75
-    if snapshot.get("uncertain_reviews"):
+    for key, title in (("uncertain_reviews", "期間境界・日付不明"), ("excluded_reviews", "期間外")):
+        if not snapshot.get(key):
+            continue
         uncertain = book.copy_worksheet(sheet)
-        uncertain.title = "期間境界・日付不明"
+        uncertain.title = title
         if uncertain.max_row > 1:
             uncertain.delete_rows(2, uncertain.max_row - 1)
-        for review in snapshot["uncertain_reviews"]:
+        for review in snapshot[key]:
             uncertain.append([spreadsheet_value(review.get(key, "")) for key, _ in FIELDS])
         for row in uncertain.iter_rows(min_row=2):
             for cell in row:
@@ -206,16 +210,19 @@ def export_reviews(rows: list[dict], metadata: dict, output_dir: Path, stem: str
         "coverage": "収集範囲", "error": "エラー", "sample": "サンプルデータ",
         "displayed_total_start": "開始時の画面総件数", "displayed_total_end": "終了時の画面総件数",
         "full_coverage_verified": "総件数と重複なし保存件数の一致", "truncated_count": "本文の省略表示が残った件数",
-        "incomplete": "全件取得未確認",
+        "incomplete": "収集・期間抽出の要確認あり",
         "text_review_count": "本文ありの口コミ件数", "rating_only_count": "評価のみの口コミ件数",
         "missing_count": "画面総件数との差（未取得件数）",
         "date_from": "期間の開始日", "date_to": "期間の終了日", "scanned_count": "期間絞り込み前の読取件数",
-        "scan_coverage_verified": "一覧全件の読取件数照合", "period_selection_verified": "期間判定に要確認なし（表示日付に基づく）",
+        "scan_coverage_verified": "一覧全件の読取件数照合", "period_selection_verified": "期間境界・日付不明なし（丸め仮定を含む）",
+        "period_date_accuracy_verified": "正確な表示日付による期間抽出の確認",
+        "period_exact_date_count": "日付表示の読取件数", "period_estimated_date_count": "相対表示から推定した読取件数",
+        "period_unknown_date_count": "投稿日不明の読取件数",
         "period_uncertain_count": "期間境界・日付不明件数", "period_excluded_count": "期間外件数", "date_filter_method": "日付の判定方法",
     }
     for key, value in metadata.items():
         summary.append([labels.get(key, key), spreadsheet_value(str(value))])
-    summary.append(["投稿日", "画面表記を保存。期間指定では相対表示を日付の範囲として推定し、境界・不明な日付は別シートへ保存。正確な投稿日を保証しません。"])
+    summary.append(["投稿日", "画面表記を保存。期間指定では相対表示を日付の範囲として推定。期間内・要確認・期間外を区分別に保存し、読取分をすべて残します。正確な投稿日を保証しません。"])
     summary.append(["本文と返信", "画面に表示されたテキスト。翻訳や省略が含まれる場合があります。"])
     summary.append(["CSV", "Excelで数式扱いされる文字列の先頭にアポストロフィを付けています。元データはJSONに保存。"])
     summary.append(["長い本文", "Excelは1セル32,767文字まで。超過分と制御文字はCSV・JSONに保存されています。"])
@@ -532,6 +539,7 @@ def run_collection(args) -> int:
                 "coverage": "画面から読み取れた口コミのみ。全件取得の保証はありません。"}
     if period:
         metadata.update(date_from=args.date_from, date_to=args.date_to or now.date().isoformat(), requested_max="指定期間（一覧全件を確認して絞り込み）")
+        print("画面の相対日付は推定で期間判定します。正確な投稿日での抽出とは異なり、境界・日付不明は確認用シートへ保存します。", flush=True)
     reviews = {}
     if args.demo:
         merge_reviews(reviews, [{"review_id": "DEMO-001", "author": "サンプル投稿者（架空）", "rating": 4,
@@ -668,10 +676,17 @@ def run_collection(args) -> int:
     scanned_rows = list(reviews.values())[:limit]
     rows = scanned_rows
     if period:
-        rows, uncertain, excluded = select_period(scanned_rows, args.date_from, args.date_to, now.date())
+        rows, uncertain, excluded = partition_period(scanned_rows, args.date_from, args.date_to, now.date())
+        dated_rows = rows + uncertain + excluded
         metadata.update(scanned_count=len(scanned_rows), period_uncertain_count=len(uncertain),
-                        period_excluded_count=excluded, period_uncertain_reviews=uncertain,
-                        date_filter_method="画面の日付を範囲として推定。範囲全体が指定期間内の行のみCSVに保存。境界・不明はExcel別シート・JSON uncertain_reviewsに保存。")
+                        period_excluded_count=len(excluded), period_uncertain_reviews=uncertain,
+                        period_excluded_reviews=excluded,
+                        period_exact_date_count=sum(row["date_precision"] == "日付表示" for row in dated_rows),
+                        period_estimated_date_count=sum("推定" in row["date_precision"] for row in dated_rows),
+                        period_unknown_date_count=sum(not row["date_earliest"] for row in dated_rows),
+                        date_filter_method="画面の日付を範囲として推定。範囲全体が指定期間内の行のみCSVに保存。Excel・JSONには期間内・境界不明・期間外の読取全行を区分別に保存。")
+        if metadata.get("stop_reason", "").startswith("画面の総件数と"):
+            metadata["stop_reason"] = metadata["stop_reason"].replace("保存件数", "読取件数")
     metadata["count"] = len(rows)
     metadata["text_review_count"] = sum(bool(row.get("text", "").strip()) for row in rows)
     metadata["rating_only_count"] = len(rows) - metadata["text_review_count"]
@@ -691,7 +706,9 @@ def run_collection(args) -> int:
                   else f"全件取得は未確認です。保存{len(rows)}件 / 画面{metadata.get('displayed_total_end', '不明')}件。", file=sys.stderr)
         if period:
             metadata["period_selection_verified"] = metadata["full_coverage_verified"] and not metadata["period_uncertain_count"]
-            metadata["incomplete"] = not metadata["period_selection_verified"]
+            metadata["period_date_accuracy_verified"] = (metadata["period_selection_verified"]
+                                                         and metadata["period_exact_date_count"] == len(scanned_rows))
+            metadata["incomplete"] = not metadata["period_date_accuracy_verified"]
             metadata["scan_coverage_verified"] = metadata["full_coverage_verified"]
             metadata["full_coverage_verified"] = False
     if not scanned_rows:
@@ -706,10 +723,18 @@ def run_collection(args) -> int:
     except Exception as error:
         print(f"ファイル保存に失敗しました: {error}", file=sys.stderr)
         return 1
-    print(f"\n{len(rows)}件を保存しました。停止理由: {metadata['stop_reason']}")
+    if period:
+        print(f"\n一覧読取: {metadata['scanned_count']}件 / 画面の総件数: {metadata.get('displayed_total_end', '不明')}件。停止理由: {metadata['stop_reason']}")
+        estimated = metadata["period_estimated_date_count"] > 0
+        print(f"期間内{'と推定' if estimated else ''}: {len(rows)}件（CSV） / 期間外{'と推定' if estimated else ''}: {metadata['period_excluded_count']}件 / 要確認: {metadata['period_uncertain_count']}件")
+        print(f"Excel・JSONに読取{metadata['scanned_count']}件すべてを区分別に保存しました。")
+    else:
+        print(f"\n{len(rows)}件を保存しました。停止理由: {metadata['stop_reason']}")
     print(f"本文あり: {metadata['text_review_count']}件 / 評価のみ: {metadata['rating_only_count']}件")
     if period:
         print(f"期間: {metadata['date_from'] or '開始指定なし'}〜{metadata['date_to']} / 一覧読取: {metadata['scanned_count']}件 / 日付の要確認: {metadata['period_uncertain_count']}件（Excel別シート）")
+        if not metadata.get("period_date_accuracy_verified", False):
+            print(f"正確な投稿日による期間抽出は未確認です。相対表示: {metadata['period_estimated_date_count']}件 / 投稿日不明: {metadata['period_unknown_date_count']}件。", file=sys.stderr)
     if metadata.get("truncated_count"):
         print(f"本文の省略が残っています: {metadata['truncated_count']}件（JSON・Excelの取得情報を確認してください）。", file=sys.stderr)
     if metadata.get("incomplete"):
@@ -719,7 +744,7 @@ def run_collection(args) -> int:
         elif remaining is None:
             print("画面の総件数を確認できませんでした。", file=sys.stderr)
         elif period and metadata.get("scan_coverage_verified"):
-            print("一覧の件数は照合済みですが、期間境界または日付不明の口コミをExcelで確認してください。", file=sys.stderr)
+            print("一覧の件数は照合済みです。期間抽出の精度はExcelの「取得情報」で、要確認の行は「期間境界・日付不明」で確認してください。", file=sys.stderr)
         else:
             print("保存済みですが、全件取得の完了を確認できませんでした。", file=sys.stderr)
         if "error" not in metadata and args.url and not metadata["stop_reason"].startswith("ユーザーが中断") and not metadata.get("scan_coverage_verified"):
