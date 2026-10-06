@@ -141,6 +141,11 @@ def csv_text(value):
     return value
 
 
+def has_review_text(row: dict) -> bool:
+    """Only the customer's body qualifies; owner replies and stars do not."""
+    return bool(row.get("text", "").strip())
+
+
 def export_reviews(rows: list[dict], metadata: dict, output_dir: Path, stem: str) -> list[Path]:
     from openpyxl import Workbook
     from openpyxl.styles import Alignment, Font, PatternFill
@@ -149,6 +154,10 @@ def export_reviews(rows: list[dict], metadata: dict, output_dir: Path, stem: str
     def spreadsheet_value(value):
         return ILLEGAL_CHARACTERS_RE.sub("", value)[:32767] if isinstance(value, str) else value
 
+    if metadata.get("review_filter") == "text_only":
+        groups = (rows, metadata.get("period_uncertain_reviews", []), metadata.get("period_excluded_reviews", []))
+        if any(not has_review_text(row) for group in groups for row in group):
+            raise ValueError("保存対象に本文のない投稿が混入しています。")
     output_dir.mkdir(parents=True, exist_ok=True)
     csv_path, xlsx_path, json_path = [output_dir / f"{stem}.{ext}" for ext in ("csv", "xlsx", "json")]
     # A JSON snapshot is saved first so original text survives spreadsheet failures.
@@ -209,11 +218,14 @@ def export_reviews(rows: list[dict], metadata: dict, output_dir: Path, stem: str
         "count": "保存件数", "stop_reason": "停止理由", "requested_max": "指定した最大件数",
         "coverage": "収集範囲", "error": "エラー", "sample": "サンプルデータ",
         "displayed_total_start": "開始時の画面総件数", "displayed_total_end": "終了時の画面総件数",
-        "full_coverage_verified": "総件数と重複なし保存件数の一致", "truncated_count": "本文の省略表示が残った件数",
+        "full_coverage_verified": "一覧照合後の本文あり全件保存確認", "truncated_count": "本文の省略表示が残った件数",
+        "saved_text_truncated_count": "全保存区分で本文の省略が残った件数",
         "incomplete": "収集・期間抽出の要確認あり",
         "text_review_count": "本文ありの口コミ件数", "rating_only_count": "評価のみの口コミ件数",
         "missing_count": "画面総件数との差（未取得件数）",
-        "date_from": "期間の開始日", "date_to": "期間の終了日", "scanned_count": "期間絞り込み前の読取件数",
+        "date_from": "期間の開始日", "date_to": "期間の終了日", "scanned_count": "一覧の読取件数（評価のみを含む）",
+        "review_filter": "保存対象", "scanned_text_review_count": "一覧の本文あり読取件数",
+        "excluded_rating_only_count": "評価のみの除外件数",
         "scan_coverage_verified": "一覧全件の読取件数照合", "period_selection_verified": "期間境界・日付不明なし（丸め仮定を含む）",
         "period_date_accuracy_verified": "正確な表示日付による期間抽出の確認",
         "period_exact_date_count": "日付表示の読取件数", "period_estimated_date_count": "相対表示から推定した読取件数",
@@ -222,7 +234,8 @@ def export_reviews(rows: list[dict], metadata: dict, output_dir: Path, stem: str
     }
     for key, value in metadata.items():
         summary.append([labels.get(key, key), spreadsheet_value(str(value))])
-    summary.append(["投稿日", "画面表記を保存。期間指定では相対表示を日付の範囲として推定。期間内・要確認・期間外を区分別に保存し、読取分をすべて残します。正確な投稿日を保証しません。"])
+    summary.append(["保存対象", "口コミ本文のある投稿のみ。評価のみ・空白本文・店舗返信のみは保存しません。一覧の件数照合には評価のみも含めます。"])
+    summary.append(["投稿日", "画面表記を保存。期間指定では相対表示を日付の範囲として推定。本文ありを期間内・要確認・期間外へ区分して保存します。正確な投稿日を保証しません。"])
     summary.append(["本文と返信", "画面に表示されたテキスト。翻訳や省略が含まれる場合があります。"])
     summary.append(["CSV", "Excelで数式扱いされる文字列の先頭にアポストロフィを付けています。元データはJSONに保存。"])
     summary.append(["長い本文", "Excelは1セル32,767文字まで。超過分と制御文字はCSV・JSONに保存されています。"])
@@ -419,13 +432,13 @@ def blocked(page) -> bool:
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(prog="google-maps-reviews", description="Googleマップの口コミを収集し、CSV・Excel・JSONに保存します。無引数で対話メニューを開きます。", epilog="準備: setup --browser chrome / 専用ブラウザーにログイン: login / 設定: settings show / CSV分析Skill導入: skill install（すべてgoogle-maps-reviewsに続けて指定）")
+    parser = argparse.ArgumentParser(prog="google-maps-reviews", description="Googleマップの本文あり口コミだけをCSV・Excel・JSONに保存します。評価のみは除外。無引数で対話メニューを開きます。", epilog="準備: setup --browser chrome / 専用ブラウザーにログイン: login / 設定: settings show / CSV分析Skill導入: skill install（すべてgoogle-maps-reviewsに続けて指定）")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("url", nargs="?", type=maps_url, help="店舗URL。省略時はブラウザーで店舗を選択")
     scope = parser.add_mutually_exclusive_group()
-    scope.add_argument("--max", type=positive_int, default=100, help="最大取得件数（既定:100）")
-    scope.add_argument("--all", action="store_true", help="件数上限なしで収集し、画面の総件数との一致を確認")
-    scope.add_argument("--visible-only", action="store_true", help="スクロールせず現在読み込まれた口コミを件数上限なしで保存")
+    scope.add_argument("--max", type=positive_int, default=100, help="本文ありの最大保存件数（既定:100）")
+    scope.add_argument("--all", action="store_true", help="一覧全件を照合し、本文あり口コミを全件保存")
+    scope.add_argument("--visible-only", action="store_true", help="スクロールせず現在読み込まれた本文あり口コミを保存")
     parser.add_argument("--from", dest="date_from", type=iso_date, help="期間の開始日 YYYY-MM-DD（当日を含む）")
     parser.add_argument("--to", dest="date_to", type=iso_date, help="期間の終了日 YYYY-MM-DD（当日を含む、省略時は取得日）")
     parser.add_argument("--manual", action="store_true", help="口コミの画面を自分で開いてから収集")
@@ -500,7 +513,7 @@ def collect_from_local_service(args, reviews: dict, metadata: dict) -> bool:
                     metadata.setdefault("displayed_total_start", data["displayedTotal"])
                 progress = (len(reviews), data["displayedTotal"])
                 if progress != last_progress:
-                    print(f"取得済み: {progress[0]}件 / 画面の総件数: {progress[1]}", flush=True)
+                    print(f"一覧読取: {progress[0]}件 / 画面の総件数: {progress[1]} / 本文あり: {sum(has_review_text(row) for row in reviews.values())}件", flush=True)
                     last_progress = progress
                 if event["type"] == "done":
                     metadata["stop_reason"] = data["reason"]
@@ -536,7 +549,9 @@ def run_collection(args) -> int:
     metadata = {"collected_at": now.isoformat(timespec="seconds"),
                 "requested_url": args.url or "",
                 "requested_max": "全件" if args.all else "読み込み済み全件" if args.visible_only else args.max,
+                "review_filter": "text_only",
                 "coverage": "画面から読み取れた口コミのみ。全件取得の保証はありません。"}
+    print("保存対象は本文ありの口コミのみです。評価のみの投稿は一覧の件数照合に使い、保存から除外します。", flush=True)
     if period:
         metadata.update(date_from=args.date_from, date_to=args.date_to or now.date().isoformat(), requested_max="指定期間（一覧全件を確認して絞り込み）")
         print("画面の相対日付は推定で期間判定します。正確な投稿日での抽出とは異なり、境界・日付不明は確認用シートへ保存します。", flush=True)
@@ -599,24 +614,26 @@ def run_collection(args) -> int:
                         no_progress_passes = 0 if added else no_progress_passes + 1
                         if data["reviews"] and not reviews:
                             raise RuntimeError("口コミは表示されていますが、投稿者または評価を読み取れません。ツールを更新してください。")
-                        progress = (min(len(reviews), limit), metadata.get('displayed_total_end'))
+                        text_count = sum(has_review_text(row) for row in reviews.values())
+                        progress = (len(reviews), metadata.get('displayed_total_end'), text_count)
                         if progress != last_progress:
-                            print(f"取得済み: {progress[0]}件 / 画面の総件数: {progress[1] if progress[1] is not None else '不明'}", flush=True)
+                            print(f"一覧読取: {progress[0]}件 / 画面の総件数: {progress[1] if progress[1] is not None else '不明'} / 本文あり: {text_count}件", flush=True)
                             last_progress = progress
-                        if len(reviews) >= limit:
-                            metadata["stop_reason"] = "指定件数に到達"
-                            break
                         if args.visible_only:
                             metadata["stop_reason"] = "現在読み込まれた口コミのみ保存"
                             break
-                        if full_coverage_verified(list(reviews.values()), metadata.get("displayed_total_end")):
-                            remaining = sum(bool(row.get("text_may_be_truncated")) for row in reviews.values())
+                        reached_limit = text_count >= limit
+                        if reached_limit or full_coverage_verified(list(reviews.values()), metadata.get("displayed_total_end")):
+                            selected_text = [row for row in reviews.values() if has_review_text(row)][:limit]
+                            remaining = sum(bool(row.get("text_may_be_truncated")) for row in selected_text)
                             if remaining and final_expansion_passes < 3 and time.monotonic() - started < args.timeout:
                                 final_expansion_passes += 1
-                                print(f"件数照合済み。省略が残る本文{remaining}件を再展開しています（{final_expansion_passes}/3）。", flush=True)
+                                status = "本文ありの指定件数に到達" if reached_limit else "一覧の件数照合済み"
+                                print(f"{status}。省略が残る本文{remaining}件を再展開しています（{final_expansion_passes}/3）。", flush=True)
                                 page.wait_for_timeout(300)
                                 continue
-                            metadata["stop_reason"] = "画面の総件数と重複なしの保存件数が一致したため終了しました。"
+                            metadata["stop_reason"] = ("本文ありの指定件数に到達" if reached_limit else
+                                                       "画面の総件数と重複なしの読取件数が一致したため終了しました。")
                             break
                         if time.monotonic() - started >= args.timeout:
                             metadata["stop_reason"] = "制限時間に到達"
@@ -673,10 +690,15 @@ def run_collection(args) -> int:
         except Exception as error:
             metadata.update(stop_reason="エラーによる停止", error=str(error))
             print(f"収集中に停止しました: {error}", file=sys.stderr)
-    scanned_rows = list(reviews.values())[:limit]
-    rows = scanned_rows
+    scanned_rows = list(reviews.values())
+    text_rows = [row for row in scanned_rows if has_review_text(row)]
+    rows = text_rows[:limit]
+    metadata.update(scanned_count=len(scanned_rows), scanned_text_review_count=len(text_rows),
+                    excluded_rating_only_count=len(scanned_rows) - len(text_rows))
+    if metadata.get("stop_reason", "").startswith("画面の総件数と"):
+        metadata["stop_reason"] = metadata["stop_reason"].replace("保存件数", "読取件数")
     if period:
-        rows, uncertain, excluded = partition_period(scanned_rows, args.date_from, args.date_to, now.date())
+        rows, uncertain, excluded = partition_period(text_rows, args.date_from, args.date_to, now.date())
         dated_rows = rows + uncertain + excluded
         metadata.update(scanned_count=len(scanned_rows), period_uncertain_count=len(uncertain),
                         period_excluded_count=len(excluded), period_uncertain_reviews=uncertain,
@@ -684,33 +706,36 @@ def run_collection(args) -> int:
                         period_exact_date_count=sum(row["date_precision"] == "日付表示" for row in dated_rows),
                         period_estimated_date_count=sum("推定" in row["date_precision"] for row in dated_rows),
                         period_unknown_date_count=sum(not row["date_earliest"] for row in dated_rows),
-                        date_filter_method="画面の日付を範囲として推定。範囲全体が指定期間内の行のみCSVに保存。Excel・JSONには期間内・境界不明・期間外の読取全行を区分別に保存。")
-        if metadata.get("stop_reason", "").startswith("画面の総件数と"):
-            metadata["stop_reason"] = metadata["stop_reason"].replace("保存件数", "読取件数")
+                        date_filter_method="本文ありの画面日付を範囲として推定。範囲全体が指定期間内の行のみCSVに保存。Excel・JSONには本文ありを期間内・境界不明・期間外へ区分して保存。評価のみは除外。")
     metadata["count"] = len(rows)
-    metadata["text_review_count"] = sum(bool(row.get("text", "").strip()) for row in rows)
+    metadata["text_review_count"] = len(rows)
     metadata["rating_only_count"] = len(rows) - metadata["text_review_count"]
     if not args.demo:
-        metadata["full_coverage_verified"] = (full_coverage_verified(scanned_rows, metadata.get("displayed_total_end"))
-                                              and "error" not in metadata and metadata.get("service_verified", True) is True)
+        scan_verified = (full_coverage_verified(scanned_rows, metadata.get("displayed_total_end"))
+                         and "error" not in metadata and metadata.get("service_verified", True) is True)
+        metadata["scan_coverage_verified"] = scan_verified
+        metadata["full_coverage_verified"] = scan_verified and not period and len(rows) == len(text_rows)
         metadata["truncated_count"] = sum(bool(row.get("text_may_be_truncated")) for row in rows)
+        preserved = rows + metadata.get("period_uncertain_reviews", []) + metadata.get("period_excluded_reviews", [])
+        metadata["saved_text_truncated_count"] = sum(bool(row.get("text_may_be_truncated")) for row in preserved)
         expected = metadata.get("displayed_total_end")
         metadata["missing_count"] = max(0, expected - len(scanned_rows)) if expected is not None else None
-        if metadata["full_coverage_verified"]:
-            metadata["coverage"] = f"画面の総件数と口コミIDの重複なしの読取件数が一致: {len(scanned_rows)}件"
+        if scan_verified:
+            metadata["coverage"] = f"一覧{len(scanned_rows)}件の読取IDを画面総件数と照合。本文あり{len(text_rows)}件・評価のみ{metadata['excluded_rating_only_count']}件。本文ありのみ保存。"
             if args.all and metadata.get("stop_reason", "").startswith("口コミ一覧の末尾"):
                 metadata["stop_reason"] = "口コミ一覧の末尾に到達し、画面の総件数との一致を確認"
-        elif args.all or period:
+        elif args.all or period or (not args.visible_only and len(rows) < limit):
             metadata["incomplete"] = True
-            print(f"一覧の全件読取は未確認です。読取{len(scanned_rows)}件 / 画面{metadata.get('displayed_total_end', '不明')}件。" if period
-                  else f"全件取得は未確認です。保存{len(rows)}件 / 画面{metadata.get('displayed_total_end', '不明')}件。", file=sys.stderr)
+            print(f"一覧の全件読取は未確認です。読取{len(scanned_rows)}件 / 画面{metadata.get('displayed_total_end', '不明')}件。" if period or args.all
+                  else f"本文ありの指定件数は未達です。保存{len(rows)}件 / 指定{limit}件。", file=sys.stderr)
         if period:
-            metadata["period_selection_verified"] = metadata["full_coverage_verified"] and not metadata["period_uncertain_count"]
+            metadata["period_selection_verified"] = scan_verified and not metadata["period_uncertain_count"]
             metadata["period_date_accuracy_verified"] = (metadata["period_selection_verified"]
-                                                         and metadata["period_exact_date_count"] == len(scanned_rows))
+                                                         and metadata["period_exact_date_count"] == len(text_rows))
             metadata["incomplete"] = not metadata["period_date_accuracy_verified"]
-            metadata["scan_coverage_verified"] = metadata["full_coverage_verified"]
             metadata["full_coverage_verified"] = False
+        if metadata["saved_text_truncated_count"]:
+            metadata["incomplete"] = True
     if not scanned_rows:
         print("口コミを取得できなかったため、口コミファイルは生成していません。", file=sys.stderr)
         if args.browser == "chromium":
@@ -723,20 +748,22 @@ def run_collection(args) -> int:
     except Exception as error:
         print(f"ファイル保存に失敗しました: {error}", file=sys.stderr)
         return 1
+    print(f"\n一覧読取: {metadata['scanned_count']}件 / 画面の総件数: {metadata.get('displayed_total_end') or '不明'}件。停止理由: {metadata['stop_reason']}")
+    print(f"本文あり読取: {metadata['scanned_text_review_count']}件 / 評価のみ除外: {metadata['excluded_rating_only_count']}件")
     if period:
-        print(f"\n一覧読取: {metadata['scanned_count']}件 / 画面の総件数: {metadata.get('displayed_total_end', '不明')}件。停止理由: {metadata['stop_reason']}")
         estimated = metadata["period_estimated_date_count"] > 0
         print(f"期間内{'と推定' if estimated else ''}: {len(rows)}件（CSV） / 期間外{'と推定' if estimated else ''}: {metadata['period_excluded_count']}件 / 要確認: {metadata['period_uncertain_count']}件")
-        print(f"Excel・JSONに読取{metadata['scanned_count']}件すべてを区分別に保存しました。")
+        print(f"Excel・JSONに本文あり{metadata['scanned_text_review_count']}件すべてを区分別に保存しました。")
     else:
-        print(f"\n{len(rows)}件を保存しました。停止理由: {metadata['stop_reason']}")
-    print(f"本文あり: {metadata['text_review_count']}件 / 評価のみ: {metadata['rating_only_count']}件")
+        print(f"本文あり{len(rows)}件をCSV・Excel・JSONに保存しました。")
+        if metadata.get("full_coverage_verified"):
+            print("一覧の件数を照合し、本文ありの口コミを全件保存しました。")
     if period:
         print(f"期間: {metadata['date_from'] or '開始指定なし'}〜{metadata['date_to']} / 一覧読取: {metadata['scanned_count']}件 / 日付の要確認: {metadata['period_uncertain_count']}件（Excel別シート）")
         if not metadata.get("period_date_accuracy_verified", False):
             print(f"正確な投稿日による期間抽出は未確認です。相対表示: {metadata['period_estimated_date_count']}件 / 投稿日不明: {metadata['period_unknown_date_count']}件。", file=sys.stderr)
-    if metadata.get("truncated_count"):
-        print(f"本文の省略が残っています: {metadata['truncated_count']}件（JSON・Excelの取得情報を確認してください）。", file=sys.stderr)
+    if metadata.get("saved_text_truncated_count"):
+        print(f"保存した本文に省略が残っています: {metadata['saved_text_truncated_count']}件（JSON・Excelの取得情報を確認してください）。", file=sys.stderr)
     if metadata.get("incomplete"):
         remaining = metadata.get("missing_count")
         if remaining:
@@ -745,6 +772,8 @@ def run_collection(args) -> int:
             print("画面の総件数を確認できませんでした。", file=sys.stderr)
         elif period and metadata.get("scan_coverage_verified"):
             print("一覧の件数は照合済みです。期間抽出の精度はExcelの「取得情報」で、要確認の行は「期間境界・日付不明」で確認してください。", file=sys.stderr)
+        elif metadata.get("saved_text_truncated_count") and metadata.get("scan_coverage_verified"):
+            print("一覧の件数は照合済みですが、本文の省略が残るため収集完了として扱いません。", file=sys.stderr)
         else:
             print("保存済みですが、全件取得の完了を確認できませんでした。", file=sys.stderr)
         if "error" not in metadata and args.url and not metadata["stop_reason"].startswith("ユーザーが中断") and not metadata.get("scan_coverage_verified"):
@@ -755,7 +784,7 @@ def run_collection(args) -> int:
                 if args.date_to:
                     retry += ["--to", args.date_to]
             else:
-                retry.append("--all")
+                retry += ["--all"] if args.all else ["--max", str(args.max)]
             retry += ["--timeout", str(max(1200, args.timeout * 2))]
             if args.manual:
                 retry.append("--manual")

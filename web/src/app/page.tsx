@@ -8,12 +8,12 @@ export default function Home() {
     <header className="cli-header"><span className="cli-brand"><MapPin aria-hidden="true" />google-maps-reviews</span><span>Mac専用 / MITライセンス</span></header>
     <main>
       <section className="cli-hero">
-        <div><h1>ターミナルから、<br />口コミをファイルに。</h1><p>Googleマップの店舗URLを指定して、<br />口コミをCSV・Excel・JSONへ。<br />収集も保存も、あなたのMacで完結します。</p></div>
+        <div><h1>ターミナルから、<br />口コミをファイルに。</h1><p>Googleマップの店舗URLを指定して、<br />本文のある口コミだけをCSV・Excel・JSONへ。<br />収集も保存も、あなたのMacで完結します。</p></div>
         <div className="cli-terminal" aria-label="ターミナルでの実行例">
           <div className="cli-terminal-title"><Terminal aria-hidden="true" /><span>ターミナル</span></div>
           <pre><code>{collect}</code></pre>
           <p className="cli-example-label">出力例</p>
-          <pre className="cli-output"><code>{'取得済み: 10件 / 画面の総件数: 30\n取得済み: 20件 / 画面の総件数: 30\n取得済み: 30件 / 画面の総件数: 30\n\n30件を保存しました。'}</code></pre>
+          <pre className="cli-output"><code>{'一覧読取: 30件 / 画面の総件数: 30\n本文あり読取: 24件 / 評価のみ除外: 6件\n\n本文あり24件をCSV・Excel・JSONに保存しました。'}</code></pre>
           <p className="cli-save"><FileSpreadsheet aria-hidden="true" />デスクトップの「GoogleMap口コミ」に保存</p>
         </div>
       </section>
@@ -26,7 +26,7 @@ export default function Home() {
       </section>
       <section className="cli-guide" aria-labelledby="usage-title">
         <h2 id="usage-title">URLを指定して収集</h2>
-        <p>店舗ページの「共有」でコピーしたURLを指定します。画面の総件数と重複なしの取得件数が一致すると、自動保存して終了します。</p>
+        <p>店舗ページの「共有」でコピーしたURLを指定します。一覧の読取件数を画面総件数と照合してから、本文ありの口コミだけを保存します。評価のみ・店舗返信のみの投稿は保存しません。</p>
         <pre><code>{collect}</code></pre>
         <p>対話で設定を選ぶ場合は、コマンド名だけで起動します。</p>
         <pre><code>google-maps-reviews</code></pre>
@@ -34,7 +34,7 @@ export default function Home() {
       </section>
       <section className="cli-guide cli-limits" aria-labelledby="limits-title">
         <h2 id="limits-title">取得結果を確認</h2>
-        <p>Googleの表示制限や確認画面により、全件を取得できない場合があります。Excelの「取得情報」で画面総件数・保存件数・停止理由・本文の省略件数を確認してください。</p>
+        <p>Googleの表示制限や確認画面により、全件を取得できない場合があります。Excelの「取得情報」で一覧の読取件数・本文ありの保存件数・評価のみの除外件数を確認してください。期間指定の日付には推定が含まれます。</p>
       </section>
     </main>
     <footer className="cli-footer"><span>google-maps-reviews</span><span>CSV / Excel / JSON</span></footer>

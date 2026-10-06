@@ -401,8 +401,8 @@ class LocalServiceCliTest(unittest.TestCase):
         output = io.StringIO()
         with tempfile.TemporaryDirectory() as folder, patch.object(cli, "build_opener", return_value=opener), redirect_stdout(output):
             self.assertEqual(cli.main(["https://www.google.com/maps/test", "--all", "--use-service", "--output-dir", folder]), 0)
-        self.assertEqual(output.getvalue().count("取得済み: 1件"), 1)
-        self.assertEqual(output.getvalue().count("取得済み: 2件"), 1)
+        self.assertEqual(output.getvalue().count("一覧読取: 1件"), 1)
+        self.assertEqual(output.getvalue().count("一覧読取: 2件"), 2)  # Progress plus final summary.
 
     def test_cli_browser_finishes_at_total_without_scrolling(self):
         page = MagicMock()
@@ -426,7 +426,7 @@ class LocalServiceCliTest(unittest.TestCase):
             launching.return_value.__exit__.assert_called_once()
             metadata = json.loads(next(Path(folder).glob("*.json")).read_text())["metadata"]
             self.assertTrue(metadata["full_coverage_verified"])
-            self.assertIn("保存件数が一致", metadata["stop_reason"])
+            self.assertIn("読取件数が一致", metadata["stop_reason"])
 
     def test_busy_service_does_not_start_another_collection(self):
         opener = MagicMock()
@@ -457,13 +457,15 @@ class LocalServiceCliTest(unittest.TestCase):
             self.assertEqual(scrolling.call_count, 11)
             self.assertTrue(any(call.kwargs.get("recover") for call in scrolling.call_args_list))
             data = json.loads(next(Path(folder).glob("*.json")).read_text())
-            self.assertEqual(data["metadata"]["count"], 2)
+            self.assertEqual(data["metadata"]["count"], 1)
             self.assertTrue(data["metadata"]["full_coverage_verified"])
-            self.assertEqual(data["reviews"][1]["text"], "")
+            self.assertEqual(len(data["reviews"]), 1)
             self.assertEqual(data["metadata"]["text_review_count"], 1)
-            self.assertEqual(data["metadata"]["rating_only_count"], 1)
+            self.assertEqual(data["metadata"]["rating_only_count"], 0)
+            self.assertEqual(data["metadata"]["scanned_count"], 2)
+            self.assertEqual(data["metadata"]["excluded_rating_only_count"], 1)
             self.assertEqual(data["metadata"]["missing_count"], 0)
-            self.assertEqual(output.getvalue().count("取得済み: 1件"), 1)
+            self.assertEqual(output.getvalue().count("一覧読取: 1件"), 1)
 
     def test_visible_only_keeps_more_than_the_default_100_reviews_without_scrolling(self):
         page = MagicMock()

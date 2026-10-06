@@ -94,10 +94,11 @@ class DateRangeTest(unittest.TestCase):
 
     def test_period_collection_scans_all_and_saves_uncertainty_in_same_workbook(self):
         page = MagicMock(url="https://www.google.com/maps/test")
-        reviews = [{"review_id": str(i), "author": "架空", "rating": 4, "text": "", "date_text": text} for i, text in enumerate(
+        reviews = [{"review_id": str(i), "author": "架空", "rating": 4, "text": "架空の口コミ本文", "date_text": text} for i, text in enumerate(
             ("2026-09-01", "2026-09-30", "2026-08-31", "最終編集: 1 年前"))]
         reviews[2]["text"] = '=HYPERLINK("https://example.com")'
-        page.evaluate.return_value = {"place_name": "テスト", "source_url": page.url, "displayed_total": 4, "reviews": reviews}
+        reviews.append({"review_id": "rating-only", "author": "架空", "rating": 5, "text": "", "date_text": "最終編集: 1 年前"})
+        page.evaluate.return_value = {"place_name": "テスト", "source_url": page.url, "displayed_total": 5, "reviews": reviews}
         context = MagicMock(pages=[page])
         with tempfile.TemporaryDirectory() as folder, patch("playwright.sync_api.sync_playwright"), patch.object(cli, "collection_browser") as launch, patch.object(cli, "prepare_reviews"), patch.object(cli, "expand_text"), patch.object(cli, "blocked", return_value=False), redirect_stdout(io.StringIO()) as output, redirect_stderr(io.StringIO()):
             launch.return_value.__enter__.return_value = context
@@ -111,13 +112,15 @@ class DateRangeTest(unittest.TestCase):
             exported = data["reviews"] + data["uncertain_reviews"] + data["excluded_reviews"]
             self.assertEqual(len(exported), 4)
             self.assertEqual({row["review_id"] for row in exported}, {"0", "1", "2", "3"})
-            self.assertEqual(data["metadata"]["scanned_count"], 4)
+            self.assertEqual(data["metadata"]["scanned_count"], 5)
+            self.assertEqual(data["metadata"]["scanned_text_review_count"], 4)
+            self.assertEqual(data["metadata"]["excluded_rating_only_count"], 1)
             self.assertEqual(data["metadata"]["missing_count"], 0)
             self.assertTrue(data["metadata"]["scan_coverage_verified"])
             self.assertFalse(data["metadata"]["full_coverage_verified"])
             self.assertFalse(data["metadata"]["period_date_accuracy_verified"])
             self.assertNotIn("保存件数が一致", output.getvalue())
-            self.assertIn("一覧読取: 4件", output.getvalue())
+            self.assertIn("一覧読取: 5件", output.getvalue())
             self.assertIn("期間外: 1件", output.getvalue())
             with next(Path(folder).glob("*.csv")).open(encoding="utf-8-sig", newline="") as stream:
                 self.assertEqual(len(list(csv.DictReader(stream))), 2)
@@ -183,7 +186,7 @@ class DateRangeTest(unittest.TestCase):
 
     def restriction_fixture(self, counts, expected=10):
         page = MagicMock(url="https://www.google.com/maps/place/Test/data=!1s0x123:0x456")
-        reviews = [{"review_id": str(i), "author": "架空", "rating": 4, "text": "", "date_text": "1 年前"} for i in range(expected)]
+        reviews = [{"review_id": str(i), "author": "架空", "rating": 4, "text": "架空の口コミ本文", "date_text": "1 年前"} for i in range(expected)]
         page.evaluate.side_effect = [{"place_name": "テスト", "source_url": page.url,
                                       "displayed_total": expected, "reviews": reviews[:count]} for count in counts]
         return page, MagicMock(pages=[page])

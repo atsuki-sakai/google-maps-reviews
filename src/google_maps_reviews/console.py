@@ -108,13 +108,14 @@ def choose(label: str, choices: dict[str, tuple[str, object]], current):
 def edit_settings(current: dict) -> dict:
     settings = dict(current)
     print("Enterで現在の設定を使います。店舗URLの「-」はブラウザーで店舗を選ぶ指定です。")
+    print("保存対象は本文ありの口コミのみです。評価のみは件数照合に使い、保存しません。")
     settings["url"] = prompt("店舗URL（未指定ならブラウザーで選択）", settings["url"],
                              lambda value: "" if value in ("", "-") else cli.maps_url(value))
-    settings["scope"] = choose("収集範囲", {"1": ("全件を目指す（取得の保証はありません）", "all"),
-                                        "2": ("最大件数を指定", "max"), "3": ("現在読み込まれた口コミのみ", "visible"),
-                                        "4": ("期間を指定", "period")}, settings["scope"])
+    settings["scope"] = choose("収集範囲（本文あり）", {"1": ("一覧全件を照合して本文ありを全件保存", "all"),
+                                        "2": ("本文ありの最大保存件数を指定", "max"), "3": ("現在読み込まれた本文ありのみ", "visible"),
+                                        "4": ("本文ありを期間で絞り込み（日付は推定を含む）", "period")}, settings["scope"])
     if settings["scope"] == "max":
-        settings["max"] = prompt("最大保存件数", settings["max"], cli.positive_int)
+        settings["max"] = prompt("本文ありの最大保存件数", settings["max"], cli.positive_int)
     if settings["scope"] == "period":
         settings["date_from"] = prompt("開始日（YYYY-MM-DD）", settings["date_from"] or "", iso_date)
         settings["date_to"] = prompt("終了日（YYYY-MM-DD、空欄は取得日）", settings["date_to"] or "", lambda value: iso_date(value) if value else None)
